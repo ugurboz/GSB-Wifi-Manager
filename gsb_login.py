@@ -7,7 +7,8 @@ Tüm fonksiyonlar yapılandırılmış veri döndürür (print yapmaz).
 
 import requests
 from bs4 import BeautifulSoup
-import keyring
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv, set_key
 import getpass
 import time
 import socket
@@ -15,6 +16,7 @@ import sys
 import json
 import os
 import re
+import subprocess
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -27,9 +29,19 @@ LOGIN_URL = f"{BASE_URL}/login.html"
 AUTH_URL = f"{BASE_URL}/j_spring_security_check"
 LOGOUT_URL = f"{BASE_URL}/logout"
 DASHBOARD_URL = f"{BASE_URL}/index.html"
+AUTO_LOGOUT_SECONDS = 60
 
 # Hesap dosyası yolu (script ile aynı dizinde)
 ACCOUNTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.json")
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+def _get_cipher():
+    load_dotenv(ENV_FILE)
+    key = os.getenv("GSB_SECRET_KEY")
+    if not key:
+        key = Fernet.generate_key().decode()
+        set_key(ENV_FILE, "GSB_SECRET_KEY", key)
+    return Fernet(key.encode())
 
 
 # ─── Çoklu Hesap Yönetimi ───────────────────────────────────────────────────
@@ -92,18 +104,20 @@ def add_account(tc, password, label=None):
     """
     data = _load_accounts_data()
     accounts = data.get('accounts', [])
+    cipher = _get_cipher()
+    enc_password = cipher.encrypt(password.encode()).decode()
     
     # Aynı TC varsa ekleme
     for acc in accounts:
         if acc['tc'] == tc:
             # Şifreyi güncelle
-            keyring.set_password(SERVICE_NAME, f"pass_{tc}", password)
+            acc['password'] = enc_password
             if label:
                 acc['label'] = label
-                _save_accounts_data(data)
+            _save_accounts_data(data)
             return False
     
-    accounts.append({'tc': tc, 'label': label or tc})
+    accounts.append({'tc': tc, 'label': label or tc, 'password': enc_password})
     data['accounts'] = accounts
     
     # İlk hesapsa aktif yap
@@ -111,7 +125,6 @@ def add_account(tc, password, label=None):
         data['active_index'] = 0
     
     _save_accounts_data(data)
-    keyring.set_password(SERVICE_NAME, f"pass_{tc}", password)
     return True
 
 
@@ -136,11 +149,6 @@ def remove_account(tc):
     
     _save_accounts_data(data)
     
-    try:
-        keyring.delete_password(SERVICE_NAME, f"pass_{tc}")
-    except keyring.errors.PasswordDeleteError:
-        pass
-    
     return True
 
 
@@ -155,8 +163,18 @@ def update_account_label(tc, label):
 
 
 def get_account_password(tc):
-    """Bir hesabın şifresini Keychain'den al."""
-    return keyring.get_password(SERVICE_NAME, f"pass_{tc}")
+    """Bir hesabın şifresini JSON'dan çözüp al."""
+    data = _load_accounts_data()
+    for acc in data.get('accounts', []):
+        if acc['tc'] == tc:
+            enc_password = acc.get('password')
+            if enc_password:
+                cipher = _get_cipher()
+                try:
+                    return cipher.decrypt(enc_password.encode()).decode()
+                except Exception:
+                    return None
+    return None
 
 
 def get_active_credentials():
@@ -200,7 +218,9 @@ def is_quota_depleted(user_info):
     if not user_info:
         return False
     try:
-        remaining = float(user_info.get('Total Remaining Quota (MB)', 1))
+        # Önce Türkçe key'e bak, yoksa eski İngilizce key'e düş
+        remaining = float(user_info.get('Toplam Kalan Kota (MB)',
+                          user_info.get('Total Remaining Quota (MB)', 1)))
         return remaining <= 1.0  # 1 MB veya altı = bitti
     except (ValueError, TypeError):
         return False
@@ -226,11 +246,62 @@ def get_next_account_index():
 
 GSB_HOST = "wifi.gsb.gov.tr"
 
+
+def _get_wifi_device():
+    """macOS'ta aktif Wi-Fi arayüz adını döner (en0/en1 gibi)."""
+    try:
+        out = subprocess.check_output(
+            ["networksetup", "-listallhardwareports"],
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        ).decode(errors='ignore')
+
+        lines = out.splitlines()
+        for i, line in enumerate(lines):
+            l = line.strip().lower()
+            if l in ("hardware port: wi-fi", "hardware port: airport"):
+                for next_line in lines[i + 1:i + 5]:
+                    if "device:" in next_line.lower():
+                        return next_line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+
+    return "en0"
+
 def _check_ssid():
     """macOS'ta bağlı Wi-Fi SSID'sini kontrol et."""
-    import subprocess
     try:
-        # Yöntem 1: system_profiler (en güvenilir)
+        # Yöntem 1: networksetup (hızlı ve kararlı)
+        wifi_device = _get_wifi_device()
+        out = subprocess.check_output(
+            ["networksetup", "-getairportnetwork", wifi_device],
+            timeout=5, stderr=subprocess.DEVNULL
+        ).decode(errors='ignore').strip()
+        # "Current Wi-Fi Network: GSBWIFI" formatı
+        if ":" in out and "not associated" not in out.lower():
+            return out.split(":", 1)[1].strip()
+    except Exception:
+        pass
+
+    try:
+        # Yöntem 2: airport aracı (bazı macOS sürümlerinde daha doğru)
+        airport_cmd = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+        out = subprocess.check_output(
+            [airport_cmd, "-I"],
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        ).decode(errors='ignore')
+        for line in out.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("SSID:"):
+                ssid = stripped.split(":", 1)[1].strip()
+                if ssid:
+                    return ssid
+    except Exception:
+        pass
+
+    try:
+        # Yöntem 3: system_profiler (fallback)
         out = subprocess.check_output(
             ["system_profiler", "SPAirPortDataType"],
             timeout=5, stderr=subprocess.DEVNULL
@@ -253,18 +324,6 @@ def _check_ssid():
             if in_current and stripped.endswith(':') and not stripped.startswith('-'):
                 # Bu ağ adıdır (örn: "GSBWIFI:")
                 return stripped.rstrip(':')
-    except Exception:
-        pass
-    
-    # Yöntem 2: networksetup (eski macOS)
-    try:
-        out = subprocess.check_output(
-            ["networksetup", "-getairportnetwork", "en0"],
-            timeout=5, stderr=subprocess.DEVNULL
-        ).decode(errors='ignore')
-        # "Current Wi-Fi Network: GSBWIFI" formatı
-        if ":" in out and "not associated" not in out.lower():
-            return out.split(":", 1)[1].strip()
     except Exception:
         pass
     
@@ -331,7 +390,12 @@ def check_gsb_session():
             - 'logged_in': bool — Giriş yapılmış mı
             - 'session': requests.Session veya None — Aktif session (varsa)
     """
-    result = {'on_network': False, 'logged_in': False, 'session': None}
+    # Önce ağ varlığını URL bağımsız şekilde tespit et.
+    # Portal kısa süre cevap vermese bile SSID/host erişimi olumluysa "on_network=True" kalmalı.
+    result = {'on_network': check_gsb_network(), 'logged_in': False, 'session': None}
+
+    if not result['on_network']:
+        return result
     
     session = requests.Session()
     session.headers.update({
@@ -348,7 +412,6 @@ def check_gsb_session():
     for url in urls_to_try:
         try:
             response = session.get(url, verify=False, timeout=5, allow_redirects=True)
-            result['on_network'] = True
             
             # Login sayfasına yönlendirildiyse oturum yok
             if 'login' in response.url.lower() or 'j_username' in response.text:
@@ -361,8 +424,7 @@ def check_gsb_session():
         except requests.exceptions.RequestException:
             continue  # sonraki URL'yi dene
     
-    # Hiçbir URL çalışmadıysa portala direkt ulaşılamıyor demektir.
-    result['on_network'] = False
+    # URL'ler cevap vermese de check_gsb_network() olumluysa "ağda" kabul ederiz.
     result['logged_in'] = False
     return result
 
@@ -383,6 +445,214 @@ def check_internet():
         return True
     except OSError:
         return False
+
+
+# ─── Ağ Kurtarma (DHCP / Wi-Fi Toggle) ─────────────────────────────────────
+
+def _get_local_ip():
+    """Wi-Fi arayüzünün mevcut IP adresini al. IP yoksa None döner."""
+    try:
+        device = _get_wifi_device()
+        out = subprocess.check_output(
+            ["ipconfig", "getifaddr", device],
+            timeout=5, stderr=subprocess.DEVNULL
+        ).decode(errors='ignore').strip()
+        if out and not out.startswith('169.254'):  # Self-assigned IP = geçersiz
+            return out
+    except (subprocess.CalledProcessError, Exception):
+        pass
+    return None
+
+
+def _renew_dhcp():
+    """
+    DHCP lease yenile. Yoğun ağlarda IP alamama sorununu çözer.
+    sudo gerektirmez — ipconfig/networksetup kullanıcı seviyesinde çalışır.
+    """
+    device = _get_wifi_device()
+    
+    # Yöntem 1: ipconfig set DHCP (en hızlı)
+    try:
+        subprocess.run(
+            ["ipconfig", "set", device, "DHCP"],
+            timeout=10, capture_output=True
+        )
+    except Exception:
+        pass
+    
+    # Yöntem 2: networksetup ile DHCP yenile
+    try:
+        subprocess.run(
+            ["networksetup", "-setdhcp", "Wi-Fi"],
+            timeout=10, capture_output=True
+        )
+    except Exception:
+        pass
+
+
+def _toggle_wifi():
+    """
+    Wi-Fi'yi kapatıp açar. IP alınamadığında son çare olarak kullanılır.
+    Bu işlem ağı sıfırdan başlatır ve yeni bir DHCP isteği tetikler.
+    """
+    try:
+        device = _get_wifi_device()
+        # Wi-Fi kapat
+        subprocess.run(
+            ["networksetup", "-setairportpower", device, "off"],
+            timeout=5, capture_output=True
+        )
+        time.sleep(2)
+        # Wi-Fi aç
+        subprocess.run(
+            ["networksetup", "-setairportpower", device, "on"],
+            timeout=5, capture_output=True
+        )
+        time.sleep(3)  # Ağa bağlanması için bekle
+    except Exception:
+        pass
+
+
+def _force_connect_gsb():
+    """
+    Kayıtlı ağlardan GSB içerenleri bulup, zorla (otomatik) bağlanmaya çalışır.
+    Wi-Fi kapalıysa önce Wi-Fi'yi açar.
+    
+    Returns:
+        bool: Başarıyla bağlandıysa True
+    """
+    try:
+        device = _get_wifi_device()
+        
+        # Wi-Fi açık mı kontrol et, kapalıysa aç
+        status_out = subprocess.check_output(
+            ["networksetup", "-getairportpower", device],
+            timeout=5, stderr=subprocess.DEVNULL
+        ).decode(errors='ignore')
+        if "Off" in status_out:
+            print("  📡 Wi-Fi kapalı, otomatik açılıyor...")
+            subprocess.run(["networksetup", "-setairportpower", device, "on"], timeout=5, capture_output=True)
+            time.sleep(3)
+            
+        # Kayıtlı ağlardan GSB içerenleri bul
+        out = subprocess.check_output(
+            ["networksetup", "-listpreferredwirelessnetworks", device],
+            timeout=5, stderr=subprocess.DEVNULL
+        ).decode(errors='ignore')
+        
+        gsb_ssids = []
+        for line in out.splitlines():
+            if 'GSB' in line.upper():
+                gsb_ssids.append(line.strip())
+        
+        if not gsb_ssids:
+            # GSB kelimesi geçen kaydedilmiş ağ yoksa varsayılan isimleri dene
+            gsb_ssids = ["GSB Wifi", "GSBWIFI", "GSB-WiFi", "GSB_Wifi"]
+            
+        for target in gsb_ssids:
+            # Şifresiz ağlar için sadece SSID yeterli
+            subprocess.run(["networksetup", "-setairportnetwork", device, target], timeout=15, capture_output=True)
+            time.sleep(3)
+            current = _check_ssid()
+            if current and target.upper() in current.upper():
+                return True
+                
+    except Exception:
+        pass
+    
+    return False
+
+
+def _wait_for_ip(timeout=15):
+    """
+    IP adresi alınana kadar bekle.
+    Returns:
+        str veya None — IP adresi veya timeout olursa None
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        ip = _get_local_ip()
+        if ip:
+            return ip
+        time.sleep(1)
+    return None
+
+
+def aggressive_network_recovery(max_cycles=5, verbose=True):
+    """
+    Ağ yoğunluğundan IP alamama sorununu agresif şekilde çözer.
+    
+    Strateji:
+      1. DHCP lease yenile + IP bekle
+      2. Başarısızsa Wi-Fi kapat/aç + IP bekle
+      3. Tekrarla (max_cycles kadar)
+    
+    Args:
+        max_cycles: Maksimum deneme döngüsü
+        verbose: Terminale durum yazdırsın mı
+    
+    Returns:
+        dict with keys:
+            - 'success': bool
+            - 'ip': str veya None
+            - 'portal_reachable': bool
+            - 'attempts': int
+    """
+    def _log(msg):
+        if verbose:
+            print(f"  [{time.strftime('%H:%M:%S')}] {msg}")
+
+    for cycle in range(1, max_cycles + 1):
+        _log(f"🔄 Ağ kurtarma döngüsü {cycle}/{max_cycles}")
+        
+        # Adım 1: Mevcut IP'yi kontrol et
+        ip = _get_local_ip()
+        if ip:
+            _log(f"✅ IP mevcut: {ip}")
+            # Portal erişilebilir mi?
+            if _can_reach_host():
+                return {'success': True, 'ip': ip, 'portal_reachable': True, 'attempts': cycle}
+            else:
+                _log("⚠️  IP var ama portal erişilemiyor, DNS/route bekleniyor...")
+                time.sleep(3)
+                if _can_reach_host():
+                    return {'success': True, 'ip': ip, 'portal_reachable': True, 'attempts': cycle}
+        
+        # Adım 2: DHCP lease yenile
+        _log("📡 DHCP lease yenileniyor...")
+        _renew_dhcp()
+        ip = _wait_for_ip(timeout=10)
+        
+        if ip:
+            _log(f"✅ DHCP'den IP alındı: {ip}")
+            time.sleep(2)  # Route'ların oturması için
+            if _can_reach_host():
+                return {'success': True, 'ip': ip, 'portal_reachable': True, 'attempts': cycle}
+        
+        # Adım 3: Wi-Fi toggle (son çare)
+        if cycle <= 2 or cycle == max_cycles:
+            _log("🔌 Wi-Fi kapatılıp açılıyor...")
+            _toggle_wifi()
+            ip = _wait_for_ip(timeout=20)
+            
+            if ip:
+                _log(f"✅ Wi-Fi toggle sonrası IP alındı: {ip}")
+                time.sleep(3)
+                if _can_reach_host():
+                    return {'success': True, 'ip': ip, 'portal_reachable': True, 'attempts': cycle}
+                _log("⚠️  IP var ama portal henüz erişilemiyor")
+            else:
+                _log("❌ IP alınamadı, tekrar denenecek...")
+        
+        # Döngü arası bekleme (giderek artan)
+        wait = min(3 * cycle, 10)
+        _log(f"⏳ {wait} saniye bekleniyor...")
+        time.sleep(wait)
+    
+    # Son kontrol
+    ip = _get_local_ip()
+    reachable = _can_reach_host() if ip else False
+    return {'success': reachable, 'ip': ip, 'portal_reachable': reachable, 'attempts': max_cycles}
 
 
 # ─── Giriş / Çıkış ─────────────────────────────────────────────────────────
@@ -586,11 +856,36 @@ def logout(session=None):
         if form:
             for btn in form.find_all('button'):
                 txt = btn.get_text(strip=True).lower()
-                if txt in ('end session', 'oturumu sonlandır', 'oturumu sonlandir'):
+                if txt in ('end session', 'oturumu sonlandır', 'oturumu sonlandir',
+                           'oturumu sonlandır', 'oturumu sonlandir'):
+                    end_session_id = btn.get('name') or btn.get('id')
+                    break
+
+        # Eğer form bulunamazsa, sayfa genelinde de ara
+        if not end_session_id:
+            for btn in soup.find_all('button'):
+                txt = btn.get_text(strip=True).lower()
+                if any(k in txt for k in ('end session', 'oturumu sonland', 'sonlandır', 'sonlandir')):
                     end_session_id = btn.get('name') or btn.get('id')
                     break
 
         if not end_session_id:
+            # Link olarak da dene (yeni portalda <a> olabilir)
+            for a in soup.find_all('a'):
+                txt = a.get_text(strip=True).lower()
+                href = a.get('href', '')
+                if any(k in txt for k in ('oturumu sonland', 'end session', 'sonlandır')):
+                    # Direkt link varsa GET ile çık
+                    try:
+                        resp = session.get(BASE_URL + href if not href.startswith('http') else href,
+                                         verify=False, timeout=8, allow_redirects=True)
+                        if _is_login_page(resp) or _verify_logged_out():
+                            return {'success': True, 'message': 'Oturum başarıyla kapatıldı'}
+                    except requests.exceptions.RequestException:
+                        pass
+
+            if _try_direct_logout() or _verify_logged_out():
+                return {'success': True, 'message': 'Oturum sunucudan kapatıldı'}
             return {'success': False, 'message': 'Oturumu Sonlandır butonu bulunamadı.'}
 
         ajax_headers = {
@@ -660,17 +955,28 @@ def fetch_user_info(session):
     """
     Giriş yapılmış session ile portal dashboard'undan kota ve hesap bilgilerini çek.
     
+    Yeni GSB portalı (v4.0.4+) Türkçe etiketler ve çoklu paket tablosu kullanıyor.
+    
     Returns:
         dict veya None — Anahtar-değer çiftleri halinde bilgiler.
         Örnek:
         {
             'Kullanıcı': 'Ad SOYAD',
             'Lokasyon': 'ÖRNEK LOKASYON',
-            'Last Login': '01.01.2026 12:00',
-            'Session Time': '0 Day 0 h 0 m 1 s',
+            'Son Giriş': '26/09/2026 12:22:29',
+            'Oturum Süresi': '0 gn 0 sa 0 dk 0 sn',
+            'Toplam Kota (MB)': '32768.0',
+            'Toplam Kalan Kota (MB)': '18154.0',
+            'Başlangıç Tarihi': '01.09.2026',
+            'Sona Erme Tarihi': '30.09.2026',
+            'Kalan Kota Zamanı': '4 gn 11 sa 37 dk 30 sn',
+            'Paketler': [
+                {'Paket Tipi': 'Sosyal Medya', 'Toplam Kota (MB)': '5120.0', ...},
+                {'Paket Tipi': 'Toplam', 'Toplam Kota (MB)': '32768.0', ...},
+            ],
+            # Geriye uyumluluk:
             'Total Quota (MB)': '32768.0',
-            'Total Remaining Quota (MB)': '32377.03',
-            ...
+            'Total Remaining Quota (MB)': '18154.0',
         }
     """
     if not session:
@@ -681,53 +987,133 @@ def fetch_user_info(session):
         soup = BeautifulSoup(response.text, 'html.parser')
 
         info = {}
+        page_text = soup.get_text(separator='\n')
 
-        # Kullanıcı adı, Son Giriş ve Lokasyon bilgisini çek (sayfa metni üzerinden)
-        # Portal yapısı karmaşık olduğu için tüm metni ayırarak aramak daha güvenilir.
-        page_text = soup.get_text(separator=' \n ')
-        
-        # 'Last Login' çevresini analiz et
-        if 'Last Login' in page_text:
-            parts = page_text.split('Last Login')
-            # 1. Kullanıcı Adı: 'Last Login' öncesindeki en son anlamlı satır
-            preceding_lines = [line.strip() for line in parts[0].split('\n') if line.strip()]
-            if preceding_lines:
-                info['Kullanıcı'] = preceding_lines[-1]
-                
-            # 2. Son Giriş: 'Last Login' sonrasındaki ilk anlamlı metin
-            following_lines = [line.strip() for line in parts[1].split('\n') if line.strip()]
-            if following_lines:
-                login_val = following_lines[0].lstrip(':').strip()
-                if login_val:
-                    info['Last Login'] = login_val
-                    
-        # 'Location' çevresini analiz et
-        if 'Location' in page_text:
-            loc_parts = page_text.split('Location')
-            following_lines_loc = [line.strip() for line in loc_parts[1].split('\n') if line.strip()]
-            if following_lines_loc:
-                loc_val = following_lines_loc[0].lstrip(':').strip()
-                if loc_val:
-                    info['Lokasyon'] = loc_val
+        # ── Kullanıcı Adı, Son Giriş, Konum ─────────────────────────
+        # Yeni portal: "Ad SOYAD\nSon Giriş:\nKonum :" şeklinde düz metin
 
-        # Tablo satırlarından kota bilgilerini çek
-        seen_labels = set()
-        skip_labels = {'', '------', '------------', 'Stop', 'Start', 'StopStart'}
-        
-        for row in soup.find_all('tr'):
-            cells = row.find_all(['td', 'th'], recursive=False)
-            if len(cells) == 2:
-                label = cells[0].get_text(strip=True).rstrip(':')
-                value = cells[1].get_text(strip=True)
-                
-                if (label and value 
-                    and label not in skip_labels 
-                    and value not in skip_labels
-                    and label not in seen_labels
-                    and len(value) < 100
-                    and len(label) < 60):
-                    info[label] = value
-                    seen_labels.add(label)
+        # Kullanıcı adı: "Son Giriş:" öncesindeki son anlamlı satır
+        for marker in ('Son Giriş:', 'Son Giriş :', 'Last Login'):
+            if marker in page_text:
+                parts = page_text.split(marker, 1)
+                preceding = [l.strip() for l in parts[0].split('\n') if l.strip()]
+                if preceding:
+                    info['Kullanıcı'] = preceding[-1]
+                # Son Giriş değeri: marker'dan sonraki ilk anlamlı satır
+                following = [l.strip() for l in parts[1].split('\n') if l.strip()]
+                if following:
+                    val = following[0].lstrip(':').strip()
+                    if val:
+                        info['Son Giriş'] = val
+                        info['Last Login'] = val  # geriye uyumluluk
+                break
+
+        # Konum / Location
+        for marker in ('Konum', 'Location'):
+            if marker in page_text:
+                parts = page_text.split(marker, 1)
+                following = [l.strip() for l in parts[1].split('\n') if l.strip()]
+                if following:
+                    val = following[0].lstrip(':').strip()
+                    if val:
+                        info['Lokasyon'] = val
+                break
+
+        # Oturum Süresi
+        for marker in ('Oturum Süresi:', 'Oturum Suresi:', 'Session Time'):
+            if marker in page_text:
+                parts = page_text.split(marker, 1)
+                following = [l.strip() for l in parts[1].split('\n') if l.strip()]
+                if following:
+                    val = following[0].lstrip(':').strip()
+                    if val:
+                        info['Oturum Süresi'] = val
+                        info['Session Time'] = val  # geriye uyumluluk
+                break
+
+        # Login Zamanı
+        for marker in ('Login Zamanı:', 'Login Zamani:', 'Login Time'):
+            if marker in page_text:
+                parts = page_text.split(marker, 1)
+                following = [l.strip() for l in parts[1].split('\n') if l.strip()]
+                if following:
+                    val = following[0].lstrip(':').strip()
+                    if val:
+                        info['Login Zamanı'] = val
+                        info['Login Time'] = val  # geriye uyumluluk
+                break
+
+        # ── Çoklu Paket Tabloları (Kota Bilgileri) ───────────────────
+        # Portal artık birden fazla tablo gösteriyor:
+        #   Tablo 1 → Paket Tipi: Sosyal Medya
+        #   Tablo 2 → Paket Tipi: Toplam
+        # Her tabloda: Toplam Kota (MB), Toplam Kalan Kota (MB),
+        #              Başlangıç Tarihi, Sona Erme Tarihi, Kalan Kota Zamanı
+
+        packages = []
+        tables = soup.find_all('table')
+
+        for table in tables:
+            pkg = {}
+            for row in table.find_all('tr'):
+                cells = row.find_all(['td', 'th'], recursive=False)
+                if len(cells) == 2:
+                    label = cells[0].get_text(strip=True).rstrip(':')
+                    value = cells[1].get_text(strip=True)
+                    if label and value and len(value) < 200 and len(label) < 80:
+                        pkg[label] = value
+            if pkg:
+                packages.append(pkg)
+
+        info['Paketler'] = packages
+
+        # "Toplam" paketini ana kota bilgisi olarak kullan (geriye uyumluluk)
+        # Yoksa en son tabloyu al (genelde Toplam en sondadır)
+        main_pkg = None
+        for pkg in packages:
+            ptype = pkg.get('Paket Tipi', pkg.get('Package Type', '')).lower()
+            if ptype in ('toplam', 'total'):
+                main_pkg = pkg
+                break
+        if not main_pkg and packages:
+            main_pkg = packages[-1]
+
+        if main_pkg:
+            # Hem Türkçe hem İngilizce ihtimallerine karşı birleştirilmiş değerleri çek
+            val_total = main_pkg.get('Toplam Kota (MB)', main_pkg.get('Total Quota (MB)'))
+            val_rem = main_pkg.get('Toplam Kalan Kota (MB)', main_pkg.get('Total Remaining Quota (MB)'))
+            val_start = main_pkg.get('Başlangıç Tarihi', main_pkg.get('Start Date'))
+            val_end = main_pkg.get('Sona Erme Tarihi', main_pkg.get('Expiration Date'))
+            val_time = main_pkg.get('Kalan Kota Zamanı', main_pkg.get('Remaining Quota Time'))
+            val_type = main_pkg.get('Paket Tipi', main_pkg.get('Package Type'))
+            
+            if val_total:
+                info['Toplam Kota (MB)'] = val_total
+                info['Total Quota (MB)'] = val_total
+            if val_rem:
+                info['Toplam Kalan Kota (MB)'] = val_rem
+                info['Total Remaining Quota (MB)'] = val_rem
+            if val_start:
+                info['Başlangıç Tarihi'] = val_start
+            if val_end:
+                info['Sona Erme Tarihi'] = val_end
+                info['Next Refresh Date'] = val_end  # geriye uyumluluk
+            if val_time:
+                info['Kalan Kota Zamanı'] = val_time
+            if val_type:
+                info['Paket Tipi'] = val_type
+
+        # ── Ek tablo dışı bilgiler (Internet Servisi vb.) ────────────
+        for marker in ('Internet Servisi:', 'İnternet Servisi:', 'Internet Service'):
+            if marker in page_text:
+                parts = page_text.split(marker, 1)
+                following = [l.strip() for l in parts[1].split('\n') if l.strip()]
+                if following:
+                    val = following[0].lstrip(':').strip()
+                    if val and 'Şifre' not in val and 'Son Hareket' not in val:
+                        info['Internet Servisi'] = val
+                        info['Internet Service'] = val  # geriye uyumluluk
+                break
 
         return info if info else None
 
@@ -753,12 +1139,18 @@ def connect_and_fetch(username, password):
     status = check_gsb_session()
     
     if not status['on_network']:
+        # Pes etmeden önce Wi-Fi'ye zorla bağlanmayı dene
+        if _force_connect_gsb():
+            time.sleep(2)
+            status = check_gsb_session()
+            
+    if not status['on_network']:
         return {
             'status': 'not_on_network',
-            'message': 'GSB Wi-Fi ağına bağlı değilsiniz. Önce GSBWIFI ağına bağlanın.',
+            'message': 'GSB Wi-Fi ağına bağlı değilsiniz',
             'session': None,
             'user_info': None,
-            'error_type': None
+            'error_type': 'network_error'
         }
     
     # 2. Zaten giriş yapılmış mı?
@@ -798,105 +1190,328 @@ def connect_and_fetch(username, password):
 
 # ─── CLI (Terminal) Modu ────────────────────────────────────────────────────
 
+def _print_user_info_table(info):
+    """Kullanıcı bilgilerini güzel tablo formatında yazdır."""
+    if not info:
+        return
+    
+    # Gösterilecek alanlar (Paketler hariç, özel yazdırılacak)
+    skip_keys = {'Paketler'}  
+    # Geriye uyumluluk key'lerini gizle (Türkçe zaten gösterilecek)
+    compat_keys = {'Total Quota (MB)', 'Total Remaining Quota (MB)', 
+                   'Next Refresh Date', 'Last Login', 'Login Time',
+                   'Session Time', 'Internet Service'}
+    
+    display_items = [(k, v) for k, v in info.items() 
+                     if k not in skip_keys and k not in compat_keys
+                     and not isinstance(v, (list, dict))]
+    
+    if not display_items:
+        return
+    
+    max_label_len = max(len(k) for k, _ in display_items)
+    
+    print("\n" + "═" * 58)
+    print("  📋 HESAP BİLGİLERİ")
+    print("═" * 58)
+    for key, value in display_items:
+        print(f"  {key:<{max_label_len}}  │  {value}")
+    
+    # Paket tabloları
+    packages = info.get('Paketler', [])
+    if packages:
+        print("─" * 58)
+        for pkg in packages:
+            ptype = pkg.get('Paket Tipi', '?')
+            total = pkg.get('Toplam Kota (MB)', '?')
+            remaining = pkg.get('Toplam Kalan Kota (MB)', '?')
+            
+            # GB'ye çevir
+            try:
+                total_f = float(total)
+                rem_f = float(remaining)
+                used_f = total_f - rem_f
+                pct = (used_f / total_f * 100) if total_f > 0 else 0
+                
+                def fmt(mb):
+                    return f"{mb/1024:.2f} GB" if mb >= 1024 else f"{mb:.0f} MB"
+                
+                bar_len = 20
+                filled = int(bar_len * pct / 100)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                
+                print(f"  📦 {ptype}: [{bar}] %{pct:.1f}")
+                print(f"     Kullanılan: {fmt(used_f)} / Kalan: {fmt(rem_f)} / Toplam: {fmt(total_f)}")
+            except (ValueError, TypeError):
+                print(f"  📦 {ptype}: Toplam {total} MB / Kalan {remaining} MB")
+    
+    print("═" * 58)
+
+
 def main():
-    """Terminal modu — geriye uyumluluk için korundu."""
+    """
+    Terminal modu — `gsb` komutu ile çalışır.
+    
+    Ne olursa olsun bağlanır:
+    - Ağ yoksa → DHCP yeniler, Wi-Fi toggle eder, sürekli dener
+    - Portal erişilmiyorsa → Agresif retry
+    - Login başarısızsa → Tekrar dener
+    - Bağlantı koptuysa → Otomatik yeniden bağlanır
+    
+    Argümanlar:
+        --reset     : Kayıtlı hesap bilgilerini sil
+        --no-keep   : Bağlantıdan sonra keepalive yapma, 60sn sonra çık
+        --keepalive : (Varsayılan) Bağlantı izlemeyi sürdür
+    """
     
     if "--reset" in sys.argv:
         if clear_credentials():
-            print("Kayıtlı bilgiler silindi.")
+            print("✅ Kayıtlı bilgiler silindi.")
         else:
-            print("Silinecek bilgi bulunamadı.")
+            print("ℹ️  Silinecek bilgi bulunamadı.")
         return
-
-    keepalive_mode = "--keepalive" in sys.argv
-
-    print("--- GSB Wi-Fi Otomatik Giriş Sistemi ---")
     
-    # Credentials
+    # Varsayılan keepalive AÇIK, --no-keep ile kapatılabilir
+    keepalive_mode = "--no-keep" not in sys.argv
+
+    print()
+    print("╔══════════════════════════════════════════════╗")
+    print("║     🌐 GSB Wi-Fi Otomatik Bağlantı Sistemi  ║")
+    print("╚══════════════════════════════════════════════╝")
+    print()
+    
+    # ── 1. Hesap bilgilerini al ─────────────────────────────────────
     username, password = get_credentials()
-    if not username or not password:
-        print("GSB Wi-Fi bilgileri bulunamadı. Lütfen giriş yapın.")
-        username = input("TC Kimlik No (veya Pasaport No): ")
-        password = getpass.getpass("Şifre: ")
+    if not username:
+        # Hiç hesap yok
+        print("  ⚠️  Kayıtlı hesap bulunamadı. Lütfen bilgileri girin.\n")
+        username = input("  TC Kimlik No (veya Pasaport No): ")
+        password = getpass.getpass("  Şifre: ")
         save_credentials(username, password)
-        print("Bilgileriniz Mac Anahtarlığına (Keychain) kaydedildi.")
-
-    # Bağlan + bilgileri çek
-    result = connect_and_fetch(username, password)
+        print("  ✅ Bilgiler güvenli şekilde kaydedildi.\n")
+    elif not password:
+        # Hesap var ama şifre eksik (örn. keyring→Fernet geçişi sonrası)
+        accounts = get_all_accounts()
+        idx = get_active_index()
+        label = accounts[idx].get('label', username) if accounts else username
+        tc_masked = username[:3] + "****" + username[-3:] if len(username) > 6 else username
+        print(f"  👤 Hesap: {label} ({tc_masked})")
+        print(f"  ⚠️  Şifre kayıtlı değil (sistem güncellemesi nedeniyle tekrar girilmesi gerekiyor)\n")
+        password = getpass.getpass("  Şifre: ")
+        add_account(username, password, label)
+        print("  ✅ Şifre güvenli şekilde kaydedildi.\n")
+    else:
+        # TC'nin ilk 3 ve son 3 hanesini göster
+        tc_masked = username[:3] + "****" + username[-3:] if len(username) > 6 else username
+        print(f"  👤 Hesap: {tc_masked}")
     
-    if result['status'] == 'not_on_network':
-        print(f"❌ {result['message']}")
+    # ── 2. Bağlantı döngüsü — NE OLURSA OLSUN BAĞLAN ──────────────
+    session = None
+    info = None
+    attempt = 0
+    max_login_attempts = 50  # Çok yüksek — pratik olarak sonsuz
+    
+    while attempt < max_login_attempts:
+        attempt += 1
+        
+        print(f"\n  🔄 Bağlantı denemesi #{attempt}...")
+        
+        # 2a. GSB ağında mıyız?
+        ssid = _check_ssid()
+        on_gsb = ssid and "GSB" in ssid.upper() if ssid else False
+        
+        if on_gsb:
+            print(f"  📶 Wi-Fi ağı: {ssid}")
+        else:
+            print(f"  📶 Wi-Fi ağı: {ssid or 'Bağlı değil'}")
+            print("  📡 GSB ağına otomatik bağlanmaya çalışılıyor...")
+            if _force_connect_gsb():
+                ssid = _check_ssid()
+                print(f"  ✅ Güncel Wi-Fi ağı: {ssid}")
+            else:
+                print("  ❌ GSB ağına bağlanılamadı. Kapsama alanında olduğunuza emin olun.")
+        
+        # 2b. IP kontrolü
+        ip = _get_local_ip()
+        
+        if not ip:
+            print("  ❌ IP adresi yok — ağ yoğunluğundan IP alınamıyor olabilir")
+            print("  🔧 Agresif ağ kurtarma başlatılıyor...")
+            
+            recovery = aggressive_network_recovery(max_cycles=5, verbose=True)
+            
+            if not recovery['success']:
+                print(f"  ❌ Ağ kurtarma başarısız ({recovery['attempts']} döngü denendi)")
+                wait = min(5 * attempt, 30)
+                print(f"  ⏳ {wait} saniye sonra yeniden denenecek... (Ctrl+C ile çık)")
+                try:
+                    time.sleep(wait)
+                except KeyboardInterrupt:
+                    print("\n  👋 Çıkılıyor...")
+                    return
+                continue
+            
+            ip = recovery['ip']
+            print(f"  ✅ Ağ kurtarma başarılı! IP: {ip}")
+        else:
+            print(f"  🌐 IP adresi: {ip}")
+        
+        # 2c. Portal erişilebilir mi?
+        if not _can_reach_host():
+            print("  ⚠️  Portal (wifi.gsb.gov.tr) erişilemiyor, DHCP yenileniyor...")
+            _renew_dhcp()
+            time.sleep(3)
+            if not _can_reach_host():
+                print("  ❌ Portal hâlâ erişilemiyor")
+                wait = min(3 * attempt, 15)
+                print(f"  ⏳ {wait}sn sonra tekrar denenecek...")
+                try:
+                    time.sleep(wait)
+                except KeyboardInterrupt:
+                    print("\n  👋 Çıkılıyor...")
+                    return
+                continue
+        
+        print("  ✅ Portal erişilebilir")
+        
+        # 2d. Login dene
+        result = connect_and_fetch(username, password)
+        
+        if result['status'] == 'connected':
+            session = result['session']
+            info = result['user_info']
+            
+            # Kullanıcı adını güncelle
+            if info and info.get('Kullanıcı'):
+                update_account_label(username, info['Kullanıcı'])
+            
+            print(f"\n  ✅ {result['message']}")
+            break
+        
+        elif result['status'] == 'login_failed':
+            print(f"  ❌ {result['message']}")
+            
+            if result['error_type'] == 'wrong_password':
+                print("  🔑 Şifre hatalı! Bilgileri sıfırlamak için: gsb --reset")
+                return
+            
+            # max_entry veya diğer hatalar — tekrar dene
+            if result['error_type'] == 'max_entry':
+                print("  🔄 Eski oturum kapatılıp tekrar denenecek...")
+                try:
+                    logout()  # Eski oturumu kapat
+                except Exception:
+                    pass
+                time.sleep(3)
+                continue
+            
+            # Connection error — ağ sorunu, tekrar dene
+            wait = min(3 * attempt, 15)
+            print(f"  ⏳ {wait}sn sonra tekrar denenecek...")
+            try:
+                time.sleep(wait)
+            except KeyboardInterrupt:
+                print("\n  👋 Çıkılıyor...")
+                return
+            continue
+        
+        elif result['status'] == 'not_on_network':
+            print("  ❌ GSB ağı tespit edilemedi, ağ kurtarma deneniyor...")
+            recovery = aggressive_network_recovery(max_cycles=3, verbose=True)
+            if not recovery['success']:
+                wait = min(5 * attempt, 30)
+                print(f"  ⏳ {wait}sn sonra tekrar denenecek...")
+                try:
+                    time.sleep(wait)
+                except KeyboardInterrupt:
+                    print("\n  👋 Çıkılıyor...")
+                    return
+            continue
+    
+    if not session:
+        print(f"\n  ❌ {max_login_attempts} deneme sonra bağlantı kurulamadı.")
+        print("  💡 Wi-Fi ayarlarınızı kontrol edin ve gsb komutunu tekrar çalıştırın.")
         return
     
-    if result['status'] == 'login_failed':
-        print(f"❌ {result['message']}")
-        if result['error_type'] == 'wrong_password':
-            print("Bilgileri sıfırlamak için '--reset' komutunu kullanabilirsiniz.")
-        return
+    # ── 3. Bilgileri göster ─────────────────────────────────────────
+    _print_user_info_table(info)
     
-    # Bilgileri göster
-    session = result['session']
-    info = result['user_info']
-    
-    print(f"\n✅ {result['message']}")
-    
-    if info:
-        print("\n" + "=" * 55)
-        print("📋 HESAP BİLGİLERİ")
-        print("=" * 55)
-        max_label_len = max(len(k) for k in info.keys())
-        for key, value in info.items():
-            print(f"  {key:<{max_label_len}}  │  {value}")
-        print("=" * 55)
-
+    # ── 4. Keepalive veya zamanlı çıkış ────────────────────────────
     if keepalive_mode:
-        print("\nBağlantı izleme başlatıldı. (Kapatmak için Ctrl+C'ye basın)")
+        print("\n  🔒 Bağlantı izleme aktif. (Ctrl+C ile çıkabilirsiniz)")
+        print("     Bağlantı koparsa otomatik yeniden bağlanacak.\n")
+        
         fail_count = 0
+        check_interval = 15  # 15 saniyede bir kontrol
         
         while True:
             try:
+                time.sleep(check_interval)
+                
                 if not check_internet():
                     fail_count += 1
-                    print(f"[{time.strftime('%H:%M:%S')}] Bağlantı kesildi! Yeniden bağlanılıyor... (Deneme: {fail_count})")
+                    ts = time.strftime('%H:%M:%S')
+                    print(f"  [{ts}] ⚠️  Bağlantı kesildi! Yeniden bağlanılıyor... (#{fail_count})")
                     
-                    if fail_count > 3:
-                        wait_time = min(60 * (fail_count - 2), 300)
-                        print(f"Çok fazla başarısız deneme. {wait_time} saniye bekleniyor...")
-                        time.sleep(wait_time)
-
+                    # Önce basit login dene
                     login_result = login(username, password)
                     if login_result['success']:
                         session = login_result['session']
                         fail_count = 0
+                        print(f"  [{time.strftime('%H:%M:%S')}] ✅ Bağlantı yeniden sağlandı!")
+                        continue
+                    
+                    # Login olmadıysa ağ sorunu var, kurtarma başlat
+                    if fail_count >= 2:
+                        print(f"  [{time.strftime('%H:%M:%S')}] 🔧 Ağ kurtarma başlatılıyor...")
+                        recovery = aggressive_network_recovery(
+                            max_cycles=3, verbose=True
+                        )
+                        if recovery['success']:
+                            login_result = login(username, password)
+                            if login_result['success']:
+                                session = login_result['session']
+                                fail_count = 0
+                                print(f"  [{time.strftime('%H:%M:%S')}] ✅ Kurtarma başarılı, bağlantı sağlandı!")
+                                continue
+                    
+                    if fail_count > 10:
+                        print(f"  [{time.strftime('%H:%M:%S')}] 😔 Çok fazla başarısız deneme, 60sn bekleniyor...")
+                        time.sleep(60)
+                    elif fail_count > 5:
+                        print(f"  [{time.strftime('%H:%M:%S')}] ⏳ 15sn bekleniyor...")
+                        time.sleep(15)
                 else:
                     if fail_count > 0:
-                        print(f"[{time.strftime('%H:%M:%S')}] Bağlantı tekrar sağlandı.")
+                        print(f"  [{time.strftime('%H:%M:%S')}] ✅ Bağlantı tekrar sağlandı!")
                         fail_count = 0
                 
-                time.sleep(30)
-                
             except KeyboardInterrupt:
-                print("\nÇıkış yapılıyor...")
+                print("\n")
+                print("  🔒 Oturum kapatılıyor...")
+                logout_result = logout(session)
+                print(f"  {logout_result['message']}")
+                print("\n  👋 Güle güle!")
                 break
             except Exception as e:
-                print(f"Beklenmedik bir hata oluştu: {e}")
-                time.sleep(30)
+                print(f"  ⚠️  Beklenmedik hata: {e}")
+                time.sleep(15)
     else:
-        # 60 saniye sonra logout
-        print(f"\n⏳ {AUTO_LOGOUT_SECONDS} saniye sonra otomatik çıkış yapılacak...")
-        print(f"   (Erken çıkmak için Ctrl+C'ye basın)")
+        # --no-keep modunda: 60sn sonra logout
+        print(f"\n  ⏳ {AUTO_LOGOUT_SECONDS}sn sonra otomatik çıkış yapılacak...")
+        print(f"     (Ctrl+C ile erken çıkabilirsiniz)")
         try:
             for remaining in range(AUTO_LOGOUT_SECONDS, 0, -1):
                 mins, secs = divmod(remaining, 60)
-                print(f"\r   Kalan süre: {mins:01d}:{secs:02d} ", end='', flush=True)
+                print(f"\r  Kalan süre: {mins:01d}:{secs:02d} ", end='', flush=True)
                 time.sleep(1)
             print()
         except KeyboardInterrupt:
-            print("\n\n⚡ Erken çıkış talebi alındı.")
+            print("\n\n  ⚡ Erken çıkış.")
 
         logout_result = logout(session)
-        print(f"\n🔒 {logout_result['message']}")
-        print("\n--- Oturum sonlandırıldı. İyi günler! ---")
+        print(f"\n  🔒 {logout_result['message']}")
+        print("\n  👋 Güle güle!")
 
 
 if __name__ == "__main__":

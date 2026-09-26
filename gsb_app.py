@@ -226,28 +226,11 @@ class GSBApp(ctk.CTk):
             self.quota_card, text="Yenilenme: -",
             font=ctk.CTkFont(size=12), text_color=("gray40", "gray60")
         )
-        self.refresh_date_label.pack(anchor="w", padx=25, pady=(0, 20))
+        self.refresh_date_label.pack(anchor="w", padx=25, pady=(0, 10))
         
-        self.quota_progress = ctk.CTkProgressBar(self.quota_card, height=14, corner_radius=7, fg_color="#3A3A3C", progress_color=COLOR_SUCCESS)
-        self.quota_progress.pack(fill="x", padx=25, pady=10)
-        self.quota_progress.set(0.0)
-        
-        qv = ctk.CTkFrame(self.quota_card, fg_color="transparent")
-        qv.pack(fill="x", padx=25, pady=10)
-        
-        # Kullanılan (Stacked)
-        used_frame = ctk.CTkFrame(qv, fg_color="transparent")
-        used_frame.pack(side="left")
-        ctk.CTkLabel(used_frame, text="Kullanılan", font=ctk.CTkFont(size=12), text_color=("gray40", "gray60")).pack(anchor="w")
-        self.quota_used_label = ctk.CTkLabel(used_frame, text="-", font=ctk.CTkFont(family=FONT_MAIN, size=24, weight="bold"))
-        self.quota_used_label.pack(anchor="w")
-        
-        # Kalan (Stacked)
-        rem_frame = ctk.CTkFrame(qv, fg_color="transparent")
-        rem_frame.pack(side="right")
-        ctk.CTkLabel(rem_frame, text="Kalan", font=ctk.CTkFont(size=12), text_color=("gray40", "gray60")).pack(anchor="e")
-        self.quota_rem_label = ctk.CTkLabel(rem_frame, text="-", font=ctk.CTkFont(family=FONT_MAIN, size=24, weight="bold"))
-        self.quota_rem_label.pack(anchor="e")
+        # Dinamik kotalar için container
+        self.quota_container = ctk.CTkScrollableFrame(self.quota_card, fg_color="transparent")
+        self.quota_container.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         # OTURUM KARTI
         self.info_card = ctk.CTkFrame(self.dash_grid, corner_radius=15, fg_color=COLOR_CARD_BG)
@@ -403,11 +386,15 @@ class GSBApp(ctk.CTk):
 
     def show_dashboard_tab(self):
         self.hide_all()
+        self.btn_nav_dashboard.configure(state="normal")
+        self.btn_nav_accounts.configure(state="normal")
         self.dashboard_frame.grid(row=0, column=0, sticky="nsew")
         self.set_active_nav(self.btn_nav_dashboard)
 
     def show_accounts_tab(self):
         self.hide_all()
+        self.btn_nav_dashboard.configure(state="normal")
+        self.btn_nav_accounts.configure(state="normal")
         self.refresh_accounts_list()
         self.accounts_frame.grid(row=0, column=0, sticky="nsew")
         self.set_active_nav(self.btn_nav_accounts)
@@ -417,6 +404,9 @@ class GSBApp(ctk.CTk):
 
     def show_loading(self, msg):
         self.hide_all()
+        self.btn_nav_dashboard.configure(state="disabled")
+        self.btn_nav_accounts.configure(state="disabled")
+        self.logout_btn.configure(state="disabled")
         self.login_subframe.pack_forget()
         self.loading_label.configure(text=msg)
         self.loading_subframe.pack(expand=True)
@@ -425,6 +415,9 @@ class GSBApp(ctk.CTk):
 
     def show_login_screen(self, msg=None):
         self.hide_all()
+        self.btn_nav_dashboard.configure(state="disabled")
+        self.btn_nav_accounts.configure(state="disabled")
+        self.logout_btn.configure(state="disabled")
         self.spinner.stop()
         self.loading_subframe.pack_forget()
         
@@ -482,9 +475,13 @@ class GSBApp(ctk.CTk):
 
     def _healer_task(self):
         tc, password = get_credentials()
-        if not tc or not password:
+        if not tc:
             self.stop_auto_healer()
-            self.after(0, self.show_login_screen, "Kayıtlı hesap eksik.")
+            self.after(0, self.show_login_screen, "Kayıtlı hesap bulunamadı.")
+            return
+        if not password:
+            self.stop_auto_healer()
+            self.after(0, self.show_login_screen, "Şifre eksik, lütfen tekrar girin.")
             return
 
         self.after(0, self.set_dashboard_reconnecting_state)
@@ -503,7 +500,7 @@ class GSBApp(ctk.CTk):
             self.after(0, self.populate_dashboard, info)
         else:
             # Login başarısız (şifre yanlış) ise healer'ı durdur, login ekranına at.
-            if result.get('error_type') == 'auth_error' or 'TC' in result.get('message', ''):
+            if result.get('error_type') in ('auth_error', 'wrong_password') or 'TC' in result.get('message', ''):
                 self.stop_auto_healer()
                 self.after(0, self.show_login_screen, result['message'])
                 return
@@ -524,9 +521,10 @@ class GSBApp(ctk.CTk):
         self.location_label.configure(text="Ağ veya portal bekleniyor...")
         self.login_time_label.configure(text="-")
         self.service_label.configure(text="-")
-        self.quota_progress.set(0)
-        self.quota_used_label.configure(text="-")
-        self.quota_rem_label.configure(text="-")
+        
+        # Dinamik kotaları temizle
+        for widget in self.quota_container.winfo_children():
+            widget.destroy()
         self.refresh_date_label.configure(text="Yenilenme: -")
         self.logout_btn.configure(state="disabled")
         self.refresh_btn.configure(state="disabled")
@@ -566,33 +564,86 @@ class GSBApp(ctk.CTk):
             self.conn_label.configure(text="Bağlı")
             self.conn_badge.configure(fg_color=COLOR_SUCCESS)
 
-            try:
-                total = float(user_info.get('Total Quota (MB)', 0))
-                rem = float(user_info.get('Total Remaining Quota (MB)', 0))
-                used = total - rem
-                progress = (used / total) if total > 0 else 0
+            # Kotaları dinamik oluştur (Sosyal Medya, Toplam vs. hepsi için)
+            for widget in self.quota_container.winfo_children():
+                widget.destroy()
 
+            packages = user_info.get('Paketler', [])
+            
+            # Eğer paketler boşsa (eski veya basit mod), tekli gösterim için fake bir paket oluştur
+            if not packages:
+                packages = [{
+                    'Paket Tipi': 'Toplam',
+                    'Toplam Kota (MB)': user_info.get('Toplam Kota (MB)', user_info.get('Total Quota (MB)', 0)),
+                    'Toplam Kalan Kota (MB)': user_info.get('Toplam Kalan Kota (MB)', user_info.get('Total Remaining Quota (MB)', 0))
+                }]
+            
+            for pkg in packages:
+                # Sadece kotası olan paketleri göster (Session Time gibi tabloları atla)
+                if 'Toplam Kota (MB)' not in pkg and 'Total Quota (MB)' not in pkg:
+                    continue
+                
+                # Türkçe mi İngilizce mi kontrol et, uygun ismi al
+                ptype = pkg.get('Paket Tipi', pkg.get('Package Type', 'Paket'))
+                
+                # Eğer İngilizce ise isimleri Türkçeleştir (ör. Social Media -> Sosyal Medya)
+                if ptype.lower() == 'social media':
+                    ptype = 'Sosyal Medya'
+                elif ptype.lower() == 'total':
+                    ptype = 'Toplam'
+                elif ptype.lower() == 'education':
+                    ptype = 'Eğitim'
+                
+                total_raw = pkg.get('Toplam Kota (MB)', pkg.get('Total Quota (MB)', 0))
+                rem_raw = pkg.get('Toplam Kalan Kota (MB)', pkg.get('Total Remaining Quota (MB)', 0))
+                
+                try:
+                    total = float(total_raw)
+                    rem = float(rem_raw)
+                    used = total - rem
+                    progress = (used / total) if total > 0 else 0
+                except (ValueError, TypeError):
+                    total, rem, used, progress = 0, 0, 0, 0
+
+                pkg_frame = ctk.CTkFrame(self.quota_container, fg_color="transparent")
+                pkg_frame.pack(fill="x", pady=(0, 15))
+                
+                # Paket Başlığı
+                ctk.CTkLabel(
+                    pkg_frame, text=ptype,
+                    font=ctk.CTkFont(family=FONT_MAIN, size=14, weight="bold")
+                ).pack(anchor="w", padx=10, pady=(0, 5))
+                
+                # Progress Bar
+                bar = ctk.CTkProgressBar(pkg_frame, height=12, corner_radius=6, fg_color="#3A3A3C")
                 if progress > 0.9:
-                    self.quota_progress.configure(progress_color=COLOR_DANGER)
+                    bar.configure(progress_color=COLOR_DANGER)
                 elif progress > 0.7:
-                    self.quota_progress.configure(progress_color=COLOR_WARNING)
+                    bar.configure(progress_color=COLOR_WARNING)
                 else:
-                    self.quota_progress.configure(progress_color=COLOR_SUCCESS)
-
-                self.quota_progress.set(progress)
-
+                    bar.configure(progress_color=COLOR_SUCCESS)
+                bar.pack(fill="x", padx=10, pady=(0, 5))
+                bar.set(progress)
+                
+                # Değerler
                 def fmt(mb):
                     return f"{mb/1024:.2f} GB" if mb >= 1024 else f"{(mb):.0f} MB"
+                
+                val_frame = ctk.CTkFrame(pkg_frame, fg_color="transparent")
+                val_frame.pack(fill="x", padx=10)
+                
+                ctk.CTkLabel(val_frame, text=f"Kullanılan: {fmt(used)}", font=ctk.CTkFont(size=11), text_color=("gray40", "gray60")).pack(side="left")
+                ctk.CTkLabel(val_frame, text=f"Kalan: {fmt(rem)}", font=ctk.CTkFont(size=11, weight="bold")).pack(side="right")
 
-                self.quota_used_label.configure(text=fmt(used))
-                self.quota_rem_label.configure(text=fmt(rem))
-
-            except ValueError:
-                self.quota_progress.set(0)
-
-            self.refresh_date_label.configure(text=f"Yenilenme: {user_info.get('Next Refresh Date', '-')}")
-            self.login_time_label.configure(text=f"Giriş Saati: {user_info.get('Login Time', user_info.get('Last Login', '-'))}")
-            self.service_label.configure(text=f"Servis: {user_info.get('Internet Service', 'GSB-WiFi')}")
+            self.refresh_date_label.configure(
+                text=f"Yenilenme: {user_info.get('Sona Erme Tarihi', user_info.get('Next Refresh Date', '-'))}"
+            )
+            self.login_time_label.configure(
+                text=f"Giriş Saati: {user_info.get('Login Zamanı', user_info.get('Login Time', user_info.get('Son Giriş', user_info.get('Last Login', '-'))))}"
+            )
+            self.service_label.configure(
+                text=f"Servis: {user_info.get('Internet Servisi', user_info.get('Internet Service', 'GSB-WiFi'))}"
+            )
 
             if is_quota_depleted(user_info):
                 self.after(500, self.try_auto_switch)

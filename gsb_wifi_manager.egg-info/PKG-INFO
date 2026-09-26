@@ -1,3 +1,25 @@
+Metadata-Version: 2.4
+Name: gsb-wifi-manager
+Version: 1.0.0
+Summary: GSB Wi-Fi Auto-Pilot & Manager with GUI
+Author-email: ugurboz <uboz4707@hotmail.com>
+License: MIT
+Project-URL: Homepage, https://github.com/ugurboz/GSB-Wifi-Manager
+Project-URL: Issues, https://github.com/ugurboz/GSB-Wifi-Manager/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: requests
+Requires-Dist: beautifulsoup4
+Requires-Dist: cryptography
+Requires-Dist: python-dotenv
+Requires-Dist: customtkinter
+Requires-Dist: darkdetect
+Requires-Dist: packaging
+Dynamic: license-file
+
 <p align="center">
   <h1 align="center">GSB Wi-Fi Manager</h1>
   <p align="center">

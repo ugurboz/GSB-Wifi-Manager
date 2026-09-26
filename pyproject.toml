@@ -17,7 +17,8 @@ classifiers = [
 dependencies = [
     "requests",
     "beautifulsoup4",
-    "keyring",
+    "cryptography",
+    "python-dotenv",
     "customtkinter",
     "darkdetect",
     "packaging"
@@ -29,6 +30,7 @@ Issues = "https://github.com/ugurboz/GSB-Wifi-Manager/issues"
 
 [project.scripts]
 gsb = "gsb_app:main"
+gsb-cli = "gsb_login:main"
 
 [tool.setuptools]
 py-modules = ["gsb_app", "gsb_login"]
