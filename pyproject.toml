@@ -29,8 +29,9 @@ Homepage = "https://github.com/ugurboz/GSB-Wifi-Manager"
 Issues = "https://github.com/ugurboz/GSB-Wifi-Manager/issues"
 
 [project.scripts]
-gsb = "gsb_app:main"
+gsb = "gsb_login:main"
 gsb-cli = "gsb_login:main"
+gsb-gui = "gsb_app:main"
 
 [tool.setuptools]
 py-modules = ["gsb_app", "gsb_login"]

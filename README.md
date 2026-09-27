@@ -1,11 +1,13 @@
 <p align="center">
-  <h1 align="center">GSB Wi-Fi Manager</h1>
+  <h1 align="center">✨ GSB Wi-Fi Manager</h1>
   <p align="center">
-    KYK / GSB yurt ağlarına otomatik bağlanma, kota takibi ve kesintisiz internet deneyimi.
+    <strong>KYK & GSB Yurt Ağları İçin Akıllı, Kesintisiz ve Çok Hesaplı Wi-Fi Yöneticisi</strong>
+    <br />
+    Portal girişlerini otomatikleştirin, kota sınırlarını aşın, kopmalara son verin.
+    <br />
     <br />
     <a href="https://github.com/ugurboz/GSB-Wifi-Manager/releases"><strong>Son Sürümü İndir »</strong></a>
-    <br />
-    <br />
+    ·
     <a href="https://github.com/ugurboz/GSB-Wifi-Manager/issues">Hata Bildir</a>
     ·
     <a href="https://github.com/ugurboz/GSB-Wifi-Manager/issues">Özellik Öner</a>
@@ -16,151 +18,158 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/Lisans-MIT-green?style=for-the-badge" alt="License"></a>
   <a href="https://github.com/ugurboz/GSB-Wifi-Manager/releases"><img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blue?style=for-the-badge" alt="Platform"></a>
+  <a href="https://github.com/ugurboz/GSB-Wifi-Manager/pulls"><img src="https://img.shields.io/badge/PRs-Welcome-brightgreen?style=for-the-badge" alt="PRs Welcome"></a>
 </p>
 
 ---
 
-## Nedir?
+## 📌 Nedir?
 
-GSB Wi-Fi Manager, Türkiye genelindeki **KYK / Gençlik ve Spor Bakanlığı** yurtlarının Wi-Fi ağına (GSBWIFI) bağlanma sürecini tamamen otomatikleştiren bir masaüstü uygulamasıdır.
+**GSB Wi-Fi Manager**, Türkiye genelindeki **KYK / Gençlik ve Spor Bakanlığı** yurtlarında kullanılan **GSBWIFI** ağına bağlanma, kota takip etme ve oturum sürdürme süreçlerini otonom hale getiren modern bir masaüstü ve terminal aracıdır.
 
-Portal'a her seferinde elle giriş yapmak, bağlantı koptuğunda fark edememek veya kota bittiğinde internetsiz kalmak gibi sorunları ortadan kaldırır.
+Her gün tarayıcıdan portala TC ve şifre girmek, yurt ağındaki yoğunluktan IP alamamak, internetin aniden kopması veya kotanız bittiğinde internetsiz kalmak gibi sorunları tamamen ortadan kaldırır.
 
 ---
 
-## ✨ Özellikler
+## ✨ Öne Çıkan Özellikler
 
 | Özellik | Açıklama |
-|---------|----------|
-| **🔄 Auto-Healer** | Bağlantı koptuğunda otomatik olarak algılar ve yeniden bağlanır. Arka planda çalışır, müdahale gerektirmez. |
-| **👥 Çoklu Hesap** | Birden fazla TC Kimlik ile hesap ekleyebilir, aralarında tek tıkla geçiş yapabilirsiniz. |
-| **📊 Kota Takibi** | Aylık internet kotanızı görsel bir ilerleme çubuğuyla anlık takip edin. |
-| **🔀 Auto-Switch** | Aktif hesabın kotası dolduğunda sıradaki hesaba otomatik geçiş yapar. |
-| **🔒 Güvenli Saklama** | Şifreler işletim sisteminin güvenli anahtar deposunda (macOS Keychain / Windows Credential Manager) saklanır. |
-| **🖥️ Modern Arayüz** | macOS tasarım diline uygun, karanlık/aydınlık mod destekli şık arayüz. |
+| :--- | :--- |
+| **🔄 Auto-Healer (Kesintisiz Bağlantı)** | Ağ kopmalarını ve portal oturum düşüşlerini arka planda periyodik kontrol eder. Bağlantı koptuğu anda saniyeler içinde otomatik olarak tekrar bağlanır. |
+| **📅 Aylık Akıllı Kota Yönetimi** | Kotası tükenen hesaplar otomatik olarak etiketlenir ve ay sonuna kadar geçişlerde atlanır. **Her ayın 1'inde kotalar otomatik olarak sıfırlanır ve açılır.** |
+| **🔀 Kesintisiz Auto-Switch** | Aktif hesabın kotası bittiğinde, şifresi yanlış olduğunda veya hesap silindiğinde sistem otomatik olarak sıradaki sağlıklı hesaba geçiş yapar. |
+| **👥 Çoklu Hesap & Otomatik İsim Çekme** | Sınırsız sayıda hesap ekleyin. Portala ilk girişte öğrencinin gerçek ad-soyad bilgisi portaldan otomatik çekilir ve profil adı olarak atanır. |
+| **📱 Maksimum Cihaz Yönetimi** | Portalda oluşan *"Maksimum cihaz hakkı dolu"* kilitlenmelerinde önceki askıda kalmış oturumları otomatik sonlandırarak yeni girişi sağlar. |
+| **🌐 Agresif Ağ Kurtarma** | Yurt ağındaki yoğunluktan dolayı IP alınamadığında veya portal yanıt vermediğinde DHCP yenileme ve Wi-Fi döngüsü ile bağlantıyı kurtarır. |
+| **🔒 Yerel Güvenli Şifreleme** | Şifreler cihazınızda AES-256 (Fernet) ile şifrelenerek saklanır. Hiçbir veri üçüncü taraf sunuculara iletilmez, yalnızca resmi GSB portalı ile iletişim kurulur. |
+| **🖥️ Çift Arayüz (GUI & CLI)** | İster modern macOS tarzı CustomTkinter masaüstü uygulamasını, ister gelişmiş terminal arayüzünü kullanın. |
 
 ---
 
-## 📸 Ekran Görüntüleri
+## 🖥️ Arayüz ve Kullanım Modları
 
-### Giriş Ekranı
-İlk çalıştırmada TC Kimlik ve şifre ile hesap ekleme ekranı.
+### 1. Modern Masaüstü Arayüzü (GUI)
+macOS tasarım diline uygun, karanlık ve aydınlık mod destekli şık masaüstü paneli:
+* **Canlı Kota Barları:** Sosyal Medya ve Toplam kotaları görsel ilerleme çubuklarıyla anlık takip edin.
+* **Hesap Kartları:** Hesaplar arasında tek tıkla geçiş yapın, yeni profiller ekleyin veya silin.
+* **Akıllı Çıkış Seçenekleri:** Sol alttaki **Çık** butonuyla interneti açık bırakarak uygulamayı kapatabilir veya **Oturumu Kapat** ile portal oturumunu güvenle sonlandırabilirsiniz.
 
-<!-- <p align="center"><img src="screenshots/login.png" width="700" alt="Giriş Ekranı"></p> -->
-
-### Genel Bakış (Dashboard)
-Bağlantı durumu, kota bilgisi ve oturum detaylarının gösterildiği ana ekran.
-
-<!-- <p align="center"><img src="screenshots/dashboard.png" width="700" alt="Dashboard"></p> -->
-
-### Hesap Yönetimi
-Birden fazla hesap ekleme, silme ve aralarında geçiş yapma ekranı.
-
-<!-- <p align="center"><img src="screenshots/accounts.png" width="700" alt="Hesaplar"></p> -->
-
-### Auto-Healer (Otomatik Yeniden Bağlanma)
-Bağlantı koptuğunda uygulamanın arka planda otomatik olarak yeniden bağlanma süreci.
-
-<!-- <p align="center"><img src="screenshots/auto-healer.png" width="700" alt="Auto-Healer"></p> -->
+### 2. Gelişmiş Terminal Arayüzü (CLI)
+Sunucularda, arka plan oturumlarında veya terminal tutkunları için zengin CLI deneyimi:
+* **Canlı Bağlantı İzleme:** Oturum durumunu arka planda izler, kopmaları anında onarır.
+* **İnteraktif Menü (`[1] + Enter`):** Canlı izlemeyi kesmeden profilleri listeleyin, değiştirin, yeni hesap ekleyin veya silin.
+* **Akıllı Kısayollar:**
+  * `Ctrl + C` : Uygulamadan çıkar (**İnternet AÇIK kalır**).
+  * `Ctrl + Z` : Oturumu güvenle kapatır ve çıkar (**İnternet KESİLİR**).
 
 ---
 
 ## 🚀 Kurulum
 
-### Hazır Uygulama (Önerilen)
-
-Python bilgisi gerektirmez. İndirip çalıştırmanız yeterlidir.
-
-1. [**Releases**](https://github.com/ugurboz/GSB-Wifi-Manager/releases) sayfasına gidin.
-2. İşletim sisteminize uygun dosyayı indirin:
-   - **macOS:** `GSB-Wifi-Manager-macOS.zip`
-   - **Windows:** `GSB-Wifi-Manager-Windows.zip`
-3. Zip dosyasını çıkarın ve uygulamayı başlatın.
-
-### Kaynak Koddan Çalıştırma (Geliştiriciler İçin)
+### Yöntem 1: Kaynak Koddan Çalıştırma (Tavsiye Edilen)
 
 ```bash
 # Repoyu klonlayın
 git clone https://github.com/ugurboz/GSB-Wifi-Manager.git
 cd GSB-Wifi-Manager
 
-# Bağımlılıkları yükleyin
+# Gerekli bağımlılıkları yükleyin
 pip install -r requirements.txt
-
-# Uygulamayı başlatın
-python gsb_app.py
 ```
 
-Alternatif olarak, projeyi geliştirme modunda kurarak terminalden `gsb` komutuyla çalıştırabilirsiniz:
+#### Masaüstü Uygulamasını (GUI) Başlatma:
+```bash
+python3 gsb_app.py
+```
+
+#### Terminal Modunu (CLI) Başlatma:
+```bash
+python3 gsb_login.py
+```
+
+---
+
+### Yöntem 2: Global CLI Kurulumu (`pip install -e .`)
+
+Projeyi sisteminize geliştirici modunda kaydederek terminalden doğrudan `gsb` komutunu kullanabilirsiniz:
 
 ```bash
 pip install -e .
-gsb
+```
+
+Kurulum tamamlandıktan sonra:
+* `gsb` : Terminal bağlantı ve izleme modunu başlatır.
+* `gsb-gui` : Masaüstü grafik arayüzünü (GUI) açar.
+
+---
+
+## ⌨️ CLI Komut Satırı Parametreleri
+
+`gsb` komutunu parametrelerle kullanarak hesapları kolayca yönetebilirsiniz:
+
+| Komut | Açıklama |
+| :--- | :--- |
+| `gsb` | Aktif hesapla otomatik bağlanır ve canlı izleme modunu başlatır. |
+| `gsb --list-accounts` | Kayıtlı tüm profilleri, aktif hesabı ve kota durumlarını listeler. |
+| `gsb --switch-account [idx]` | Belirtilen indeks numaralı hesaba geçiş yapar (Parametresiz girilirse seçim listesi sunar). |
+| `gsb --add-account` | Terminalden yeni bir TC ve şifre ekler veya mevcut hesabı günceller. |
+| `gsb --remove-account [tc/idx]` | Belirtilen hesabı siler (TC veya indeks numarası girilebilir). |
+| `gsb --logout` | Açık olan GSB portal oturumunu kapatır ve internet bağlantısını keser. |
+| `gsb --reset` | Cihazda kayıtlı tüm hesap bilgilerini sıfırlar. |
+| `gsb --no-keep` | Giriş yaptıktan sonra arka planda izleme yapmaz, 60 saniye sonra oturumu kapatır. |
+
+---
+
+## 🔄 Mimari ve Çalışma Mantığı
+
+```mermaid
+flowchart TD
+    Start([Uygulama Başlatıldı]) --> CheckNet{Ağ Kontrolü}
+    CheckNet -->|GSB Ağında Değil| ForceConnect[GSB Wi-Fi Ağına Otomatik Bağlan]
+    CheckNet -->|GSB Ağında| CheckIP{IP Adresi Var mı?}
+    ForceConnect --> CheckIP
+    
+    CheckIP -->|IP Alınamadı| AggressiveRecovery[Agresif Ağ Kurtarma: DHCP Yenile / Wi-Fi Toggle]
+    AggressiveRecovery --> CheckIP
+    CheckIP -->|IP Başarılı| CheckSession{Oturum Durumu}
+    
+    CheckSession -->|Zaten Açık| FetchInfo[Kullanıcı & Kota Bilgilerini Çek]
+    CheckSession -->|Kapalı| DoLogin[Portal Üzerinden Giriş Yap]
+    
+    DoLogin -->|Giriş Başarılı| FetchInfo
+    DoLogin -->|Kota Bitti / Şifre Hatalı| AutoSwitch[Sıradaki Uygun Hesaba Otomatik Geçiş Yap]
+    AutoSwitch --> DoLogin
+    
+    FetchInfo --> CheckQuota{Bu Ay Kota Dolu mu?}
+    CheckQuota -->|Evet| MarkQuota[Ay Sonuna Kadar Pasif Olarak Etiketle] --> AutoSwitch
+    CheckQuota -->|Hayır| StartHealer[Auto-Healer & Canlı İzleme Döngüsü]
+    
+    StartHealer --> ConnectionLost{Bağlantı Koptu mu?}
+    ConnectionLost -->|Evet| DoLogin
+    ConnectionLost -->|Hayır| StartHealer
 ```
 
 ---
 
-## 🛠️ Nasıl Çalışır?
+## 🔒 Güvenlik ve Gizlilik
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   GSB Wi-Fi Manager                 │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│   1. Ağ Tespiti                                     │
-│      └── GSBWIFI ağına bağlı mı kontrol et          │
-│                                                     │
-│   2. Portal Girişi                                  │
-│      └── wifi.gsb.gov.tr'ye otomatik login          │
-│                                                     │
-│   3. Auto-Healer (Arka Plan)                        │
-│      └── Bağlantıyı 5 sn aralıklarla izle           │
-│      └── Kopma algılanırsa → yeniden bağlan          │
-│                                                     │
-│   4. Kota Kontrolü                                  │
-│      └── Kota bittiyse → sıradaki hesaba geç         │
-│                                                     │
-└─────────────────────────────────────────────────────┘
-```
-
----
-
-## 🔒 Güvenlik
-
-- **Şifreler** işletim sisteminizin güvenli anahtar deposunda saklanır:
-  - macOS → Keychain
-  - Windows → Credential Manager
-- **TC Kimlik numaraları** yalnızca yerel cihazınızdaki `accounts.json` dosyasında bulunur ve bu dosya `.gitignore` ile Git dışında tutulur.
-- Uygulama **hiçbir veriyi dışarıya göndermez**. Tüm iletişim yalnızca `wifi.gsb.gov.tr` portali ile yapılır.
-
----
-
-## ⚙️ Teknik Detaylar
-
-| Bileşen | Teknoloji |
-|---------|-----------|
-| Arayüz | [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) |
-| HTTP İstemci | [Requests](https://docs.python-requests.org/) |
-| HTML Ayrıştırma | [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/) |
-| Şifre Saklama | [Keyring](https://github.com/jaraco/keyring) |
-| Paketleme | [PyInstaller](https://pyinstaller.org/) + GitHub Actions |
+1. **Yerel Saklama:** Tüm kullanıcı verileri ve hesap listesi yalnızca kullanıcının yerel cihazındaki güvenli dizinde (`~/.gsb_wifi/`) saklanır. Proje klasöründe tutulmaz, Git reposuna dahil edilmez ve paket güncellemelerinde kaybolmaz.
+2. **Kriptografik Koruma:** Şifreler düz metin olarak değil, `cryptography` modülü kullanılarak güçlü AES tabanlı Fernet şifreleme algoritmasıyla korunur.
+3. **Sıfır Telemetri:** Uygulama hiçbir analitik, telemetri veya harici sunucuya veri aktarımı yapmaz; ağ istekleri yalnızca resmi `wifi.gsb.gov.tr` portal adresine gönderilir.
 
 ---
 
 ## 🤝 Katkıda Bulunma
 
-Her türlü katkıya açığız!
-
-1. Bu repoyu **fork** edin.
-2. Yeni bir branch oluşturun: `git checkout -b ozellik/yeni-ozellik`
-3. Değişikliklerinizi commit edin: `git commit -m 'Yeni özellik eklendi'`
-4. Branch'inizi push edin: `git push origin ozellik/yeni-ozellik`
-5. Bir **Pull Request** açın.
-
-Hata bildirimleri ve özellik önerileri için [Issues](https://github.com/ugurboz/GSB-Wifi-Manager/issues) sayfasını kullanabilirsiniz.
+Projeye katkıda bulunmaktan çekinmeyin!
+1. Bu depoyu çatallayın (**Fork**).
+2. Yeni bir özellik dalı açın (`git checkout -b ozellik/harika-fikir`).
+3. Değişikliklerinizi kaydedin (`git commit -m 'feat: Harika özellik eklendi'`).
+4. Dalınızı uzak depoya gönderin (`git push origin ozellik/harika-fikir`).
+5. Bir **Pull Request (PR)** oluşturun.
 
 ---
 
 ## 📝 Lisans
 
-Bu proje [MIT Lisansı](LICENSE) ile lisanslanmıştır.
+Bu proje [MIT Lisansı](LICENSE) kapsamında lisanslanmıştır. Özgürce kullanılabilir, değiştirilebilir ve dağıtılabilir.

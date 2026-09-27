@@ -2,3 +2,12 @@
 __pycache__/
 accounts.json
 .env
+*.egg-info/
+dist/
+build/
+*.html
+*.pyc
+.venv/
+env/
+venv/
+.pytest_cache/

@@ -1,3 +1,0 @@
-[console_scripts]
-gsb = gsb_app:main
-gsb-cli = gsb_login:main

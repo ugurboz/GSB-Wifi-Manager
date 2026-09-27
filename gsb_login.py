@@ -31,9 +31,41 @@ LOGOUT_URL = f"{BASE_URL}/logout"
 DASHBOARD_URL = f"{BASE_URL}/index.html"
 AUTO_LOGOUT_SECONDS = 60
 
-# Hesap dosyası yolu (script ile aynı dizinde)
-ACCOUNTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.json")
-ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+# Kullanıcı yapılandırma ve veri dizini (~/.gsb_wifi)
+def _get_config_dir():
+    """Kullanıcı verilerinin saklanacağı dizini belirler (~/.gsb_wifi).
+    Mevcut yerel dosya varsa güvenli bir şekilde taşır.
+    """
+    config_dir = os.getenv("GSB_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".gsb_wifi")
+    os.makedirs(config_dir, exist_ok=True)
+    if hasattr(os, "chmod"):
+        try:
+            os.chmod(config_dir, 0o700)
+        except Exception:
+            pass
+
+    # Geriye dönük uyumluluk: Çalışma veya script dizininde eski dosya varsa kopyala
+    search_dirs = [
+        os.path.dirname(os.path.abspath(__file__)),
+        os.getcwd()
+    ]
+    for fname in ("accounts.json", ".env"):
+        dest = os.path.join(config_dir, fname)
+        if not os.path.exists(dest):
+            for sdir in search_dirs:
+                src = os.path.join(sdir, fname)
+                if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(dest):
+                    try:
+                        import shutil
+                        shutil.copy2(src, dest)
+                        break
+                    except Exception:
+                        pass
+    return config_dir
+
+CONFIG_DIR = _get_config_dir()
+ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
+ENV_FILE = os.path.join(CONFIG_DIR, ".env")
 
 def _get_cipher():
     load_dotenv(ENV_FILE)
@@ -41,17 +73,35 @@ def _get_cipher():
     if not key:
         key = Fernet.generate_key().decode()
         set_key(ENV_FILE, "GSB_SECRET_KEY", key)
+        if hasattr(os, "chmod") and os.path.exists(ENV_FILE):
+            try:
+                os.chmod(ENV_FILE, 0o600)
+            except Exception:
+                pass
     return Fernet(key.encode())
 
 
 # ─── Çoklu Hesap Yönetimi ───────────────────────────────────────────────────
 
 def _load_accounts_data():
-    """accounts.json dosyasını oku."""
+    """accounts.json dosyasını oku ve geçmiş aylara ait kota doldu etiketlerini temizle."""
     if os.path.exists(ACCOUNTS_FILE):
         try:
             with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            
+            # Ay başında kotalar yenilendiği için geçmiş ay etiketlerini temizle
+            current_month = time.strftime('%Y-%m')
+            needs_save = False
+            for acc in data.get('accounts', []):
+                old_month = acc.get('quota_depleted_month')
+                if old_month and old_month != current_month:
+                    del acc['quota_depleted_month']
+                    needs_save = True
+            if needs_save:
+                _save_accounts_data(data)
+                
+            return data
         except (json.JSONDecodeError, IOError):
             pass
     return {"accounts": [], "active_index": 0}
@@ -61,6 +111,11 @@ def _save_accounts_data(data):
     """accounts.json dosyasına yaz."""
     with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    if hasattr(os, "chmod") and os.path.exists(ACCOUNTS_FILE):
+        try:
+            os.chmod(ACCOUNTS_FILE, 0o600)
+        except Exception:
+            pass
 
 
 def get_all_accounts():
@@ -90,6 +145,27 @@ def set_active_index(index):
     if 0 <= index < len(accounts):
         data['active_index'] = index
         _save_accounts_data(data)
+
+
+def validate_tc(tc):
+    """
+    TC Kimlik No doğrulama.
+    - 11 haneli olmalı
+    - Sadece rakamlardan oluşmalı
+    - İlk hane 0 olamaz
+    
+    Returns:
+        tuple: (bool, str) — (Geçerli mi, Hata mesajı)
+    """
+    if not tc:
+        return False, "TC Kimlik No boş olamaz."
+    if not tc.isdigit():
+        return False, "TC Kimlik No sadece rakamlardan oluşmalıdır."
+    if len(tc) != 11:
+        return False, f"TC Kimlik No 11 haneli olmalıdır. (Girilen: {len(tc)} hane)"
+    if tc[0] == '0':
+        return False, "TC Kimlik No '0' ile başlayamaz."
+    return True, ""
 
 
 def add_account(tc, password, label=None):
@@ -136,30 +212,52 @@ def remove_account(tc):
     """
     data = _load_accounts_data()
     accounts = data.get('accounts', [])
-    new_accounts = [a for a in accounts if a['tc'] != tc]
+    old_active_idx = data.get('active_index', 0)
+    old_active_tc = accounts[old_active_idx]['tc'] if 0 <= old_active_idx < len(accounts) else None
     
+    new_accounts = [a for a in accounts if a['tc'] != tc]
     if len(new_accounts) == len(accounts):
         return False  # Bulunamadı
     
     data['accounts'] = new_accounts
     
-    # Aktif index'i düzelt
-    if data['active_index'] >= len(new_accounts):
-        data['active_index'] = max(0, len(new_accounts) - 1)
-    
+    if not new_accounts:
+        data['active_index'] = 0
+    else:
+        # Eğer silinen hesap o an aktif hesapsa, yeni aktif hesap ilk hesap (0) olsun
+        if tc == old_active_tc:
+            data['active_index'] = 0
+        else:
+            # Silinen hesap aktif hesap değilse, eski aktif hesabın yeni indexini bul
+            found = False
+            for i, a in enumerate(new_accounts):
+                if a['tc'] == old_active_tc:
+                    data['active_index'] = i
+                    found = True
+                    break
+            if not found:
+                data['active_index'] = 0
+                
     _save_accounts_data(data)
-    
     return True
 
 
 def update_account_label(tc, label):
     """Hesap etiketini güncelle (portaldan çekilen isim ile)."""
+    if not tc or not label:
+        return False
     data = _load_accounts_data()
+    changed = False
     for acc in data.get('accounts', []):
         if acc['tc'] == tc:
-            acc['label'] = label
-            _save_accounts_data(data)
-            return
+            if acc.get('label') != label:
+                acc['label'] = label
+                changed = True
+            break
+    if changed:
+        _save_accounts_data(data)
+        return True
+    return False
 
 
 def get_account_password(tc):
@@ -201,17 +299,18 @@ def save_credentials(username, password):
 
 def clear_credentials():
     """Tüm hesapları siler (geriye uyumluluk)."""
-    accounts = get_all_accounts()
-    if not accounts:
+    data = _load_accounts_data()
+    if not data.get('accounts'):
         return False
-    for acc in accounts:
-        remove_account(acc['tc'])
+    data['accounts'] = []
+    data['active_index'] = 0
+    _save_accounts_data(data)
     return True
 
 
 def is_quota_depleted(user_info):
     """
-    Kota bitmiş mi kontrol et.
+    Portal kullanıcı verisinde kalan kota bitmiş mi kontrol et.
     Returns:
         bool: Kalan kota 0 veya çok düşükse True
     """
@@ -226,20 +325,88 @@ def is_quota_depleted(user_info):
         return False
 
 
-def get_next_account_index():
+def is_account_quota_depleted(account_or_tc):
+    """
+    Belirtilen hesabın bu ayki kotası dolmuş olarak etiketlenmiş mi kontrol et.
+    GSB kotaları her ay başında (1. gün 00:00) yenilendiği için, etiket sadece
+    içinde bulunulan ay (YYYY-MM) boyunca geçerlidir. Ay değiştiğinde otomatik açılır.
+    
+    Returns:
+        bool: Bu ay kotası dolmuşsa True, değilse False
+    """
+    if not account_or_tc:
+        return False
+    
+    current_month = time.strftime('%Y-%m')
+    
+    if isinstance(account_or_tc, dict):
+        month = account_or_tc.get('quota_depleted_month')
+        return month == current_month
+    elif isinstance(account_or_tc, str):
+        for acc in get_all_accounts():
+            if acc.get('tc') == account_or_tc:
+                return acc.get('quota_depleted_month') == current_month
+    return False
+
+
+def mark_account_quota_depleted(tc, depleted=True):
+    """
+    Hesabın kotasını bu ay için doldu olarak etiketle veya etiketi kaldır.
+    
+    Args:
+        tc: TC Kimlik No
+        depleted: True ise bu ay için kota doldu etiketi koyar, False ise temizler
+    """
+    data = _load_accounts_data()
+    changed = False
+    current_month = time.strftime('%Y-%m')
+    
+    for acc in data.get('accounts', []):
+        if acc.get('tc') == tc:
+            if depleted:
+                if acc.get('quota_depleted_month') != current_month:
+                    acc['quota_depleted_month'] = current_month
+                    changed = True
+            else:
+                if 'quota_depleted_month' in acc:
+                    del acc['quota_depleted_month']
+                    changed = True
+            break
+            
+    if changed:
+        _save_accounts_data(data)
+
+
+def get_next_account_index(skip_quota_depleted=True):
     """
     Aktif hesaptan sonraki hesap indeksini döner.
+    
+    Args:
+        skip_quota_depleted (bool): True ise bu ay kotası tükenmiş hesapları atlar.
     Returns:
-        int veya None: Sonraki hesap indeksi, başka hesap yoksa None
+        int veya None: Sonraki uygun hesap indeksi, başka uygun hesap yoksa None
     """
     accounts = get_all_accounts()
     if len(accounts) <= 1:
         return None
+    
     current = get_active_index()
-    next_idx = (current + 1) % len(accounts)
-    if next_idx == current:
-        return None
-    return next_idx
+    n = len(accounts)
+    
+    # Sıradaki hesaplardan kotası dolmamış ilkini ara
+    for step in range(1, n):
+        idx = (current + step) % n
+        if skip_quota_depleted:
+            if not is_account_quota_depleted(accounts[idx]):
+                return idx
+        else:
+            return idx
+            
+    # Eğer tüm diğer hesapların kotası dolmuşsa ve skip_quota_depleted=False ise
+    if not skip_quota_depleted:
+        return (current + 1) % n
+        
+    return None
 
 
 # ─── Bağlantı Kontrolleri ──────────────────────────────────────────────────
@@ -269,7 +436,7 @@ def _get_wifi_device():
     return "en0"
 
 def _check_ssid():
-    """macOS'ta bağlı Wi-Fi SSID'sini kontrol et."""
+    """macOS'ta bağlı Wi-Fi SSID'sini veya ağ kimliğini kontrol et."""
     try:
         # Yöntem 1: networksetup (hızlı ve kararlı)
         wifi_device = _get_wifi_device()
@@ -283,50 +450,25 @@ def _check_ssid():
     except Exception:
         pass
 
+    # Yöntem 2: DHCP paketinden domain kontrolü (macOS Sonoma/Sequoia'da airport silindiğinde en güvenilir)
     try:
-        # Yöntem 2: airport aracı (bazı macOS sürümlerinde daha doğru)
-        airport_cmd = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+        wifi_device = _get_wifi_device()
         out = subprocess.check_output(
-            [airport_cmd, "-I"],
-            timeout=5,
-            stderr=subprocess.DEVNULL,
+            ["ipconfig", "getpacket", wifi_device],
+            timeout=3, stderr=subprocess.DEVNULL
         ).decode(errors='ignore')
-        for line in out.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("SSID:"):
-                ssid = stripped.split(":", 1)[1].strip()
-                if ssid:
-                    return ssid
+        if "kykwifi" in out.lower() or "gsb" in out.lower():
+            return "GSBWIFI"
     except Exception:
         pass
 
+    # Yöntem 3: Portal sunucusu ve yerel IP erişilebilirliği
     try:
-        # Yöntem 3: system_profiler (fallback)
-        out = subprocess.check_output(
-            ["system_profiler", "SPAirPortDataType"],
-            timeout=5, stderr=subprocess.DEVNULL
-        ).decode(errors='ignore')
-        
-        in_current = False
-        for line in out.splitlines():
-            stripped = line.strip()
-            if 'Current Network Information' in stripped:
-                in_current = True
-                continue
-            if in_current and stripped and ':' not in stripped:
-                # Bu satır SSID adıdır (ağ adı satırdan sonra ":" ile ayrılır)
-                pass
-            if in_current and 'SSID' in stripped and ':' in stripped:
-                ssid = stripped.split(':', 1)[1].strip()
-                return ssid
-            # SSID, Current Network Information'dan sonra gelen ilk "key:" satırı
-            # Ancak bazı versiyonlarda format farklı olabilir
-            if in_current and stripped.endswith(':') and not stripped.startswith('-'):
-                # Bu ağ adıdır (örn: "GSBWIFI:")
-                return stripped.rstrip(':')
+        if _get_local_ip() and _can_reach_host():
+            return "GSBWIFI"
     except Exception:
         pass
-    
+
     return None
 
 
@@ -431,19 +573,62 @@ def check_gsb_session():
 
 def check_internet():
     """
-    Gerçek internet erişimi var mı kontrolü (Google DNS üzerinden).
-    GSB'ye giriş yapıldıktan SONRA kullanılır.
+    Gerçek internet erişimi var mı kontrolü.
+    Birden fazla endpoint deneyerek false alarm oranını azaltır.
+    GSB captive portal ağlarında tek endpoint güvenilmez olabilir.
     
     Returns:
         bool: İnternet erişimi varsa True
     """
+    # Birden fazla endpoint dene — herhangi biri çalışırsa internet var
+    endpoints = [
+        ("8.8.8.8", 53),       # Google DNS
+        ("1.1.1.1", 53),       # Cloudflare DNS
+        ("208.67.222.222", 53), # OpenDNS
+    ]
+    for host, port in endpoints:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect((host, port))
+            s.close()
+            return True
+        except OSError:
+            continue
+    
+    # TCP başarısızsa HTTP dene (GSB portalı arkasında DNS kısıtlı olabilir)
     try:
-        socket.setdefaulttimeout(3)
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("8.8.8.8", 53))
-        s.close()
+        r = requests.get("http://www.google.com/generate_204", timeout=5, verify=False)
+        return r.status_code == 204 or r.status_code == 200
+    except Exception:
+        pass
+    
+    return False
+
+
+def check_gsb_session_alive(session):
+    """
+    GSB portalında oturum hâlâ açık mı kontrol et.
+    check_internet()'ten daha güvenilir — doğrudan portal durumunu kontrol eder.
+    
+    Returns:
+        bool: Oturum açıksa True
+    """
+    if not session:
+        return False
+    try:
+        r = session.get(DASHBOARD_URL, verify=False, timeout=8, allow_redirects=True)
+        # 1. Önce Maksimum cihaz hatasını kontrol et (çünkü bu sayfada da Çıkış butonu olabilir)
+        if 'maksimumcihaz' in r.url.lower() or 'maksimum cihaz' in r.text.lower() or 'maximum entry' in r.text.lower():
+            return False
+        # 2. Login sayfasına yönlendirildiyse oturum kapanmış
+        if 'login' in r.url.lower() or 'j_username' in r.text:
+            return False
+        # 3. Dashboard'da "Çıkış" butonu varsa oturum açık
+        if 'logout' in r.text.lower() or 'Çıkış' in r.text:
+            return True
         return True
-    except OSError:
+    except requests.exceptions.RequestException:
         return False
 
 
@@ -515,8 +700,12 @@ def _toggle_wifi():
 
 def _force_connect_gsb():
     """
-    Kayıtlı ağlardan GSB içerenleri bulup, zorla (otomatik) bağlanmaya çalışır.
-    Wi-Fi kapalıysa önce Wi-Fi'yi açar.
+    GSB Wi-Fi ağına zorla bağlanır.
+    
+    - Başka bir ağa bağlıysa önce o ağdan kopar
+    - Wi-Fi kapalıysa açar
+    - Kayıtlı GSB ağlarını bulup bağlanır
+    - Bulamazsa varsayılan GSB SSID'lerini dener
     
     Returns:
         bool: Başarıyla bağlandıysa True
@@ -533,7 +722,41 @@ def _force_connect_gsb():
             print("  📡 Wi-Fi kapalı, otomatik açılıyor...")
             subprocess.run(["networksetup", "-setairportpower", device, "on"], timeout=5, capture_output=True)
             time.sleep(3)
+        
+        # Şu anki bağlı SSID'yi kontrol et
+        current_ssid = _check_ssid()
+        
+        if current_ssid and "GSB" not in current_ssid.upper():
+            # Başka bir ağa bağlı! Önce kopar
+            print(f"  📡 '{current_ssid}' ağından ayrılınıyor...")
             
+            # Yöntem 1: airport ile disconnect (daha güvenilir)
+            airport_cmd = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+            try:
+                subprocess.run(
+                    [airport_cmd, "-z"],  # -z = disassociate (ağdan kopar)
+                    timeout=5, capture_output=True
+                )
+            except Exception:
+                pass
+            
+            time.sleep(2)
+            
+            # Hâlâ bağlıysa, Wi-Fi toggle yap
+            still_connected = _check_ssid()
+            if still_connected and "GSB" not in still_connected.upper():
+                print("  🔌 Wi-Fi yeniden başlatılıyor...")
+                subprocess.run(
+                    ["networksetup", "-setairportpower", device, "off"],
+                    timeout=5, capture_output=True
+                )
+                time.sleep(1)
+                subprocess.run(
+                    ["networksetup", "-setairportpower", device, "on"],
+                    timeout=5, capture_output=True
+                )
+                time.sleep(3)
+        
         # Kayıtlı ağlardan GSB içerenleri bul
         out = subprocess.check_output(
             ["networksetup", "-listpreferredwirelessnetworks", device],
@@ -551,10 +774,17 @@ def _force_connect_gsb():
             
         for target in gsb_ssids:
             # Şifresiz ağlar için sadece SSID yeterli
-            subprocess.run(["networksetup", "-setairportnetwork", device, target], timeout=15, capture_output=True)
+            print(f"  📡 '{target}' ağına bağlanılıyor...")
+            try:
+                subprocess.run(["networksetup", "-setairportnetwork", device, target], timeout=15, capture_output=True)
+            except subprocess.TimeoutExpired:
+                # networksetup captive portal ağlarında asılı kalabilir, bağlantı aslında başarılı olmuş olabilir
+                pass
+            
             time.sleep(3)
             current = _check_ssid()
-            if current and target.upper() in current.upper():
+            if current and ("GSB" in current.upper() or target.upper() in current.upper()):
+                print(f"  ✅ '{current}' ağına bağlandı!")
                 return True
                 
     except Exception:
@@ -657,7 +887,145 @@ def aggressive_network_recovery(max_cycles=5, verbose=True):
 
 # ─── Giriş / Çıkış ─────────────────────────────────────────────────────────
 
-def login(username, password):
+def _terminate_all_sessions(session, response=None):
+    """
+    'Maksimum Cihaz Hakkı Dolu' sayfasındaki tüm aktif oturumları sonlandırır.
+    
+    PrimeFaces AJAX simülasyonu başarısız olduğu için, doğrudan standart (non-AJAX)
+    form submit yöntemi kullanıyoruz. Bu, JavaScript kapalı bir tarayıcının
+    yapacağı gibi tüm form verilerini (hidden input'lar, ViewState ve buton adı)
+    doğrudan POST etmektir.
+    
+    Args:
+        session: requests.Session — login sırasında kullanılan session
+        response: requests.Response veya None
+    
+    Returns:
+        bool: En az bir işlem denendiyse True
+    """
+    MAX_DEVICE_URL = f"{BASE_URL}/maksimumCihazHakkiDolu.html"
+    
+    try:
+        print("  📋 Aktif oturumlar kontrol ediliyor...")
+        
+        # JSF sistemlerinde Maksimum Cihaz sayfası POST verisiyle dolar.
+        # Yeni bir GET isteği yaparsak tablo boş gelir veya login sayfasına atar.
+        # Bu yüzden her zaman auth'tan gelen orijinal response'u kullanmalıyız.
+        page = response
+        
+        if not page:
+            # Fallback (normalde buraya düşmemeli)
+            page = session.get(MAX_DEVICE_URL, verify=False, timeout=10, allow_redirects=True)
+            
+        soup = BeautifulSoup(page.text, 'html.parser')
+        
+        view_state = None
+        for inp in soup.find_all('input', {'name': 'javax.faces.ViewState'}):
+            view_state = inp.get('value')
+            if view_state:
+                break
+                
+        if not view_state:
+            print("  ⚠️  ViewState bulunamadı, oturum sonlandırılamayabilir.")
+            return False
+            
+        # "Sonlandır" butonlarını (veya formlarını) bul
+        terminate_buttons = []
+        for btn in soup.find_all('button'):
+            text = btn.get_text(strip=True).lower()
+            if any(k == text or k in text for k in ('sonlandır', 'sonlandir', 'terminate', 'end')):
+                terminate_buttons.append(btn)
+                
+        if not terminate_buttons:
+            print("  ⚠️  Sonlandırılacak aktif cihaz bulunamadı.")
+            # Yalnızca GSB_DEBUG=1 olduğunda hata ayıklama dosyası kaydet
+            if os.getenv("GSB_DEBUG") == "1":
+                try:
+                    debug_file = os.path.join(CONFIG_DIR, "gsb_debug_max_device.html")
+                    with open(debug_file, "w", encoding="utf-8") as f:
+                        f.write(page.text)
+                    print(f"  🐛 Hata ayıklama sayfası '{debug_file}' konumuna kaydedildi.")
+                except Exception:
+                    pass
+            return False
+            
+        print(f"  🔍 {len(terminate_buttons)} aktif oturum bulundu, sonlandırılıyor...")
+        terminated_any = False
+        
+        # Her buton için standart form submit dene
+        for idx, btn in enumerate(terminate_buttons):
+            btn_name = btn.get('name') or btn.get('id')
+            if not btn_name:
+                continue
+                
+            form = btn.find_parent('form')
+            if not form:
+                continue
+                
+            form_action = form.get('action') or MAX_DEVICE_URL
+            if not form_action.startswith('http'):
+                form_action = f"{BASE_URL}{form_action if form_action.startswith('/') else '/' + form_action}"
+                
+            print(f"  🔄 Oturum #{idx+1} sonlandırılıyor...")
+            
+            # Form içindeki tüm input'ları topla (ViewState dahil)
+            payload = {}
+            for inp in form.find_all(['input', 'select', 'textarea']):
+                name = inp.get('name')
+                if name:
+                    payload[name] = inp.get('value', '')
+            
+            # Butonun kendisini form data'ya ekle (tıklandığını belirtmek için)
+            payload[btn_name] = btn_name
+            
+            # Güncel ViewState'i zorla
+            payload['javax.faces.ViewState'] = view_state
+            
+            # AJAX İSTEMİYORUZ, standart POST
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Referer': MAX_DEVICE_URL,
+                'Origin': BASE_URL,
+            }
+            
+            try:
+                r = session.post(form_action, data=payload, headers=headers, verify=False, timeout=15, allow_redirects=True)
+                
+                # Yeni ViewState al
+                new_soup = BeautifulSoup(r.text, 'html.parser')
+                for inp in new_soup.find_all('input', {'name': 'javax.faces.ViewState'}):
+                    vs = inp.get('value')
+                    if vs:
+                        view_state = vs
+                        break
+                        
+                terminated_any = True
+                print(f"  ✅ Oturum #{idx+1} sonlandırma isteği gönderildi!")
+                time.sleep(1)
+            except Exception as e:
+                print(f"  ❌ Oturum #{idx+1} hata: {e}")
+                
+        # Eğer buton bulamadıysa URL tabanlı fallback dene
+        if not terminated_any:
+            fallback_urls = [
+                f"{BASE_URL}/terminateSession",
+                f"{BASE_URL}/j_spring_security_logout",
+            ]
+            for url in fallback_urls:
+                try:
+                    session.get(url, verify=False, timeout=5)
+                    terminated_any = True
+                except:
+                    pass
+
+        return terminated_any
+        
+    except Exception as e:
+        print(f"  ❌ Sonlandırma işlemi başarısız: {e}")
+        return False
+
+
+def login(username, password, _max_entry_retries=0):
     """
     GSB Wi-Fi'ye giriş yap.
     
@@ -697,38 +1065,58 @@ def login(username, password):
             allow_redirects=True, verify=False, timeout=10
         )
 
-        # Başarı kontrolü
-        if "Çıkış" in auth_response.text or "logout" in auth_response.text.lower():
+        # Başarı/Hata kontrolü
+        # 1. Önce Maksimum Cihaz kontrolü yap (çünkü o sayfada da Çıkış kelimesi var!)
+        if ("maximum entry reached" in auth_response.text.lower()
+              or "maksimum giriş" in auth_response.text.lower()
+              or "maksimumcihaz" in auth_response.url.lower()
+              or "maksimum cihaz" in auth_response.text.lower()):
+            # Maksimum cihaz hakkı dolu — diğer cihazları zorla sonlandır ve tekrar dene
+            if _max_entry_retries >= 3:
+                return {
+                    'success': False,
+                    'session': None,
+                    'message': 'Maksimum giriş hakkı doldu. 3 deneme sonra diğer cihazlar sonlandırılamadı.',
+                    'error_type': 'max_entry'
+                }
+            terminated = _terminate_all_sessions(session, auth_response)
+            if terminated:
+                time.sleep(2)
+                return login(username, password, _max_entry_retries + 1)
+            return {
+                'success': False,
+                'session': None,
+                'message': 'Maksimum giriş hakkı doldu. Diğer cihazlar sonlandırılamadı.',
+                'error_type': 'max_entry'
+            }
+        
+        # 2. Maksimum cihaz değilse, başarı kontrolü yap
+        elif "Çıkış" in auth_response.text or "logout" in auth_response.text.lower():
             return {
                 'success': True,
                 'session': session,
                 'message': 'Giriş başarılı',
                 'error_type': None
             }
-        elif "maximum entry reached" in auth_response.text.lower() or "maksimum giriş" in auth_response.text.lower():
-            # Eski oturumu kapatıp tekrar dene
-            try:
-                session.get(LOGOUT_URL, verify=False, timeout=5)
-                time.sleep(2)
-                return login(username, password)
-            except:
-                pass
-            return {
-                'success': False,
-                'session': None,
-                'message': 'Maksimum giriş hakkı doldu. Eski oturum kapatılamadı.',
-                'error_type': 'max_entry'
-            }
         else:
-            error_type = None
-            if "hatalı" in auth_response.text.lower() or "yanlış" in auth_response.text.lower():
-                error_type = 'wrong_password'
+            # Login başarısız — sebebi ne olursa olsun (yanlış şifre, sistem hatası vs.)
+            # Eğer login sayfasına geri atıldıysa veya başarı belirteci yoksa,
+            # bu her zaman bir kimlik doğrulama hatasıdır.
+            # Sonsuz döngüye girmemek için error_type'ı her zaman 'wrong_password' yapıyoruz.
+            error_msg = 'Giriş başarısız: Hatalı TC veya şifre'
+            
+            # Portal'dan gelen spesifik hata mesajlarını kontrol et
+            resp_lower = auth_response.text.lower()
+            if any(k in resp_lower for k in ('hatalı', 'yanlış', 'incorrect', 'invalid', 'wrong', 'error')):
+                error_msg = 'Giriş başarısız: TC veya şifre hatalı'
+            elif 'login' in auth_response.url.lower() or 'j_username' in auth_response.text:
+                error_msg = 'Giriş başarısız: Portal giriş bilgilerini kabul etmedi'
             
             return {
                 'success': False,
                 'session': None,
-                'message': 'Giriş başarısız: Hatalı bilgiler veya sistem hatası',
-                'error_type': error_type
+                'message': error_msg,
+                'error_type': 'wrong_password'
             }
 
     except requests.exceptions.RequestException as e:
@@ -1062,7 +1450,21 @@ def fetch_user_info(session):
                     value = cells[1].get_text(strip=True)
                     if label and value and len(value) < 200 and len(label) < 80:
                         pkg[label] = value
-            if pkg:
+            
+            # Sadece geçerli kota paketi tablolarını al
+            if pkg and ('Toplam Kota (MB)' in pkg or 'Total Quota (MB)' in pkg):
+                if 'Total Quota (MB)' in pkg and 'Toplam Kota (MB)' not in pkg:
+                    pkg['Toplam Kota (MB)'] = pkg['Total Quota (MB)']
+                if 'Total Remaining Quota (MB)' in pkg and 'Toplam Kalan Kota (MB)' not in pkg:
+                    pkg['Toplam Kalan Kota (MB)'] = pkg['Total Remaining Quota (MB)']
+                if 'Package Type' in pkg and 'Paket Tipi' not in pkg:
+                    pkg['Paket Tipi'] = pkg['Package Type']
+                if 'Start Date' in pkg and 'Başlangıç Tarihi' not in pkg:
+                    pkg['Başlangıç Tarihi'] = pkg['Start Date']
+                if 'Expiration Date' in pkg and 'Sona Erme Tarihi' not in pkg:
+                    pkg['Sona Erme Tarihi'] = pkg['Expiration Date']
+                if 'Remaining Quota Time' in pkg and 'Kalan Kota Zamanı' not in pkg:
+                    pkg['Kalan Kota Zamanı'] = pkg['Remaining Quota Time']
                 packages.append(pkg)
 
         info['Paketler'] = packages
@@ -1156,6 +1558,8 @@ def connect_and_fetch(username, password):
     # 2. Zaten giriş yapılmış mı?
     if status['logged_in'] and status['session']:
         user_info = fetch_user_info(status['session'])
+        if user_info and user_info.get('Kullanıcı') and username:
+            update_account_label(username, user_info['Kullanıcı'])
         return {
             'status': 'connected',
             'message': 'Zaten giriş yapılmış. Bilgiler çekildi.',
@@ -1178,6 +1582,8 @@ def connect_and_fetch(username, password):
     
     # 4. Bilgileri çek
     user_info = fetch_user_info(login_result['session'])
+    if user_info and user_info.get('Kullanıcı') and username:
+        update_account_label(username, user_info['Kullanıcı'])
     
     return {
         'status': 'connected',
@@ -1195,9 +1601,31 @@ def _print_user_info_table(info):
     if not info:
         return
     
-    # Gösterilecek alanlar (Paketler hariç, özel yazdırılacak)
-    skip_keys = {'Paketler'}  
-    # Geriye uyumluluk key'lerini gizle (Türkçe zaten gösterilecek)
+    # Gerçek kota paketlerini filtrele
+    valid_packages = []
+    for pkg in info.get('Paketler', []):
+        tot = pkg.get('Toplam Kota (MB)', pkg.get('Total Quota (MB)'))
+        rem = pkg.get('Toplam Kalan Kota (MB)', pkg.get('Total Remaining Quota (MB)'))
+        if tot is not None and rem is not None:
+            valid_packages.append(pkg)
+            
+    # Eğer paket listesinde kota paketi yoksa ama üst düzey info'da varsa paket oluştur
+    if not valid_packages and ('Toplam Kota (MB)' in info or 'Total Quota (MB)' in info):
+        tot = info.get('Toplam Kota (MB)', info.get('Total Quota (MB)'))
+        rem = info.get('Toplam Kalan Kota (MB)', info.get('Total Remaining Quota (MB)'))
+        if tot and rem:
+            valid_packages.append({
+                'Paket Tipi': info.get('Paket Tipi', info.get('Package Type', 'Toplam')),
+                'Toplam Kota (MB)': tot,
+                'Toplam Kalan Kota (MB)': rem
+            })
+
+    # Üst tabloda gösterilecek alanlar
+    skip_keys = {'Paketler'}
+    if valid_packages:
+        # Kota paketleri altta şık progress bar ile gösterileceği için üstteki ham sayıları ve paket tipini gizle
+        skip_keys.update({'Toplam Kota (MB)', 'Toplam Kalan Kota (MB)', 'Paket Tipi', 'Package Type'})
+
     compat_keys = {'Total Quota (MB)', 'Total Remaining Quota (MB)', 
                    'Next Refresh Date', 'Last Login', 'Login Time',
                    'Session Time', 'Internet Service'}
@@ -1206,10 +1634,10 @@ def _print_user_info_table(info):
                      if k not in skip_keys and k not in compat_keys
                      and not isinstance(v, (list, dict))]
     
-    if not display_items:
+    if not display_items and not valid_packages:
         return
-    
-    max_label_len = max(len(k) for k, _ in display_items)
+        
+    max_label_len = max([len(k) for k, _ in display_items] + [15]) if display_items else 15
     
     print("\n" + "═" * 58)
     print("  📋 HESAP BİLGİLERİ")
@@ -1217,24 +1645,28 @@ def _print_user_info_table(info):
     for key, value in display_items:
         print(f"  {key:<{max_label_len}}  │  {value}")
     
-    # Paket tabloları
-    packages = info.get('Paketler', [])
-    if packages:
+    if valid_packages:
         print("─" * 58)
-        for pkg in packages:
-            ptype = pkg.get('Paket Tipi', '?')
-            total = pkg.get('Toplam Kota (MB)', '?')
-            remaining = pkg.get('Toplam Kalan Kota (MB)', '?')
+        for pkg in valid_packages:
+            ptype = pkg.get('Paket Tipi', pkg.get('Package Type', 'Paket'))
+            if str(ptype).lower() == 'social media':
+                ptype = 'Sosyal Medya'
+            elif str(ptype).lower() == 'total':
+                ptype = 'Toplam'
+            elif str(ptype).lower() == 'education':
+                ptype = 'Eğitim'
             
-            # GB'ye çevir
+            total = pkg.get('Toplam Kota (MB)', pkg.get('Total Quota (MB)', '0'))
+            remaining = pkg.get('Toplam Kalan Kota (MB)', pkg.get('Total Remaining Quota (MB)', '0'))
+            
             try:
                 total_f = float(total)
                 rem_f = float(remaining)
-                used_f = total_f - rem_f
+                used_f = max(0.0, total_f - rem_f)
                 pct = (used_f / total_f * 100) if total_f > 0 else 0
                 
                 def fmt(mb):
-                    return f"{mb/1024:.2f} GB" if mb >= 1024 else f"{mb:.0f} MB"
+                    return f"{mb/1024:.2f} GB" if mb >= 1024 else f"{mb:.1f} MB"
                 
                 bar_len = 20
                 filled = int(bar_len * pct / 100)
@@ -1246,6 +1678,17 @@ def _print_user_info_table(info):
                 print(f"  📦 {ptype}: Toplam {total} MB / Kalan {remaining} MB")
     
     print("═" * 58)
+
+
+def _print_keepalive_banner():
+    """Bağlantı izleme durumu ve kısayolları ekrana yazdır."""
+    print("\n  🔒 Bağlantı izleme aktif. Bağlantı koparsa otomatik bağlanacak.")
+    print("  ────────────────────────────────────────────────────────")
+    print("  ⌨️  Kısayollar:")
+    print("     [1] + Enter: Hesap Ayarları Menüsünü Aç")
+    print("     [Ctrl + C] : Uygulamadan çık (İnternet AÇIK kalır)")
+    print("     [Ctrl + Z] : Oturumu kapat ve çık (İnternet KESİLİR)")
+    print("  ────────────────────────────────────────────────────────\n")
 
 
 def main():
@@ -1263,12 +1706,175 @@ def main():
         --no-keep   : Bağlantıdan sonra keepalive yapma, 60sn sonra çık
         --keepalive : (Varsayılan) Bağlantı izlemeyi sürdür
     """
+    import signal
     
+    _current_active_session = [None]
+    
+    # --- CTRL+Z (SIGTSTP) İle Oturum Kapatma ---
+    def sigtstp_handler(signum, frame):
+        print("\n\n  🔒 Oturum kapatılıyor... (Ctrl+Z algılandı)")
+        try:
+            curr_s = _current_active_session[0]
+            logout_result = logout(curr_s)
+            print(f"  {logout_result['message']}")
+        except Exception:
+            pass
+        print("\n  👋 Güle güle!")
+        sys.exit(0)
+        
+    try:
+        signal.signal(signal.SIGTSTP, sigtstp_handler)
+    except AttributeError:
+        pass # Windows'ta SIGTSTP yok
+
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("\nKullanım: gsb [seçenekler]\n")
+        print("Seçenek belirtilmezse otomatik olarak aktif hesapla bağlanır ve bağlantıyı izler.\n")
+        print("  --add-account           : Yeni hesap ekle")
+        print("  --list-accounts         : Kayıtlı hesapları listele")
+        print("  --switch-account <idx>  : Aktif hesabı değiştir (Index no ile)")
+        print("  --remove-account <tc>   : Belirtilen hesabı sil")
+        print("  --logout                : Mevcut oturumu kapat (İnterneti keser)")
+        print("  --reset                 : Tüm hesap bilgilerini sıfırla")
+        print("  --no-keep               : Bağlantıdan sonra izleme yapma (60sn sonra çıkar)")
+        print("\nKısayollar:")
+        print("  Ctrl+C : Uygulamadan çık (Bağlantı açık kalır)")
+        print("  Ctrl+Z : Oturumu güvenle kapat ve çık (Bağlantı kesilir)\n")
+        return
+
+    if "--logout" in sys.argv:
+        print("\n  🔒 Oturum kapatılıyor...")
+        res = logout(None)
+        print(f"  {res['message']}")
+        return
+        
+    if "--list-accounts" in sys.argv:
+        accounts = get_all_accounts()
+        if not accounts:
+            print("\n  ℹ️  Kayıtlı hesap bulunmamaktadır.\n")
+            return
+        idx = get_active_index()
+        print("\n  📋 Kayıtlı Hesaplar:")
+        for i, acc in enumerate(accounts):
+            marker = "⭐" if i == idx else "  "
+            quota_tag = " [⚠️ Kota Dolu (Ay Sonu Yenilenir)]" if is_account_quota_depleted(acc) else ""
+            print(f"  {marker} [{i}] {acc.get('label', acc['tc'])} ({acc['tc'][:3]}********){quota_tag}")
+        print("\n  Aktif hesabı değiştirmek için: gsb --switch-account <index>\n")
+        return
+        
+    if "--add-account" in sys.argv:
+        print("\n  ➕ Yeni Hesap Ekle")
+        tc = input("  TC Kimlik No: ").strip()
+        valid, msg = validate_tc(tc)
+        if not valid:
+            print(f"  ❌ {msg}\n")
+            return
+        pwd = getpass.getpass("  Şifre: ").strip()
+        if not pwd:
+            print("  ❌ Şifre boş olamaz.\n")
+            return
+        label = input("  Etiket (Örn: Telefonum): ").strip()
+        is_new = add_account(tc, pwd, label or tc)
+        if is_new:
+            print(f"  ✅ Yeni hesap başarıyla eklendi! ({label or tc})\n")
+        else:
+            print(f"  ℹ️  Mevcut hesap başarıyla güncellendi! ({label or tc})\n")
+        
+        accounts = get_all_accounts()
+        for i, acc in enumerate(accounts):
+            if acc['tc'] == tc:
+                if len(accounts) > 1 and i != get_active_index():
+                    ans = input(f"  ⭐ Bu hesabı aktif hesap yapmak ister misiniz? (E/h): ").strip().lower()
+                    if ans in ('', 'e', 'evet', 'y', 'yes'):
+                        set_active_index(i)
+                        print(f"  ✅ Aktif hesap seçildi: [{i}] {acc.get('label', acc['tc'])}\n")
+                break
+        return
+        
+    if "--switch-account" in sys.argv:
+        accounts = get_all_accounts()
+        if not accounts:
+            print("\n  ❌ Kayıtlı hesap bulunamadı.\n")
+            return
+        
+        idx_arg = None
+        try:
+            flag_idx = sys.argv.index("--switch-account")
+            if flag_idx + 1 < len(sys.argv) and not sys.argv[flag_idx + 1].startswith("-"):
+                idx_arg = sys.argv[flag_idx + 1]
+        except ValueError:
+            pass
+        
+        if idx_arg is None:
+            print("\n  📋 Kayıtlı Hesaplar:")
+            curr_idx = get_active_index()
+            for i, acc in enumerate(accounts):
+                marker = "⭐" if i == curr_idx else "  "
+                quota_tag = " [⚠️ Kota Dolu (Ay Sonu Yenilenir)]" if is_account_quota_depleted(acc) else ""
+                print(f"  {marker} [{i}] {acc.get('label', acc['tc'])} ({acc['tc'][:3]}********){quota_tag}")
+            idx_str = input("\n  Geçilecek hesabın numarası: ").strip()
+        else:
+            idx_str = idx_arg
+        
+        if idx_str.isdigit() and 0 <= int(idx_str) < len(accounts):
+            new_idx = int(idx_str)
+            set_active_index(new_idx)
+            chosen = accounts[new_idx]
+            quota_tag = " [⚠️ Kota Dolu (Ay Sonu Yenilenir)]" if is_account_quota_depleted(chosen) else ""
+            print(f"\n  ✅ Aktif hesap değiştirildi: [{new_idx}] {chosen.get('label', chosen['tc'])}{quota_tag}\n")
+        else:
+            print(f"\n  ❌ Geçersiz index! 0 ile {len(accounts)-1} arasında bir değer girin.\n")
+        return
+        
+    if "--remove-account" in sys.argv:
+        accounts = get_all_accounts()
+        if not accounts:
+            print("\n  ❌ Kayıtlı hesap bulunamadı.\n")
+            return
+        
+        target_arg = None
+        try:
+            flag_idx = sys.argv.index("--remove-account")
+            if flag_idx + 1 < len(sys.argv) and not sys.argv[flag_idx + 1].startswith("-"):
+                target_arg = sys.argv[flag_idx + 1]
+        except ValueError:
+            pass
+        
+        if target_arg is None:
+            print("\n  📋 Silinecek Hesabı Seçin:")
+            for i, acc in enumerate(accounts):
+                marker = "⭐" if i == get_active_index() else "  "
+                print(f"  {marker} [{i}] {acc.get('label', acc['tc'])} ({acc['tc'][:3]}********)")
+            target_str = input("\n  Index numarası veya TC Kimlik No: ").strip()
+        else:
+            target_str = target_arg
+        
+        if not target_str:
+            print("\n  ❌ İşlem iptal edildi.\n")
+            return
+        
+        if target_str.isdigit() and len(target_str) < 3 and 0 <= int(target_str) < len(accounts):
+            target_tc = accounts[int(target_str)]['tc']
+            target_label = accounts[int(target_str)].get('label', target_tc)
+        else:
+            target_tc = target_str
+            target_label = target_str
+            for acc in accounts:
+                if acc['tc'] == target_tc:
+                    target_label = acc.get('label', target_tc)
+                    break
+        
+        if remove_account(target_tc):
+            print(f"\n  ✅ Hesap silindi: {target_label} ({target_tc[:3]}****)\n")
+        else:
+            print(f"\n  ⚠️  Belirtilen hesaba ait kayıt bulunamadı: {target_str}\n")
+        return
+
     if "--reset" in sys.argv:
         if clear_credentials():
-            print("✅ Kayıtlı bilgiler silindi.")
+            print("\n  ✅ Tüm kayıtlı hesap bilgileri silindi.\n")
         else:
-            print("ℹ️  Silinecek bilgi bulunamadı.")
+            print("\n  ℹ️  Silinecek bilgi bulunamadı.\n")
         return
     
     # Varsayılan keepalive AÇIK, --no-keep ile kapatılabilir
@@ -1285,12 +1891,20 @@ def main():
     if not username:
         # Hiç hesap yok
         print("  ⚠️  Kayıtlı hesap bulunamadı. Lütfen bilgileri girin.\n")
-        username = input("  TC Kimlik No (veya Pasaport No): ")
-        password = getpass.getpass("  Şifre: ")
+        while True:
+            username = input("  TC Kimlik No (veya Pasaport No): ").strip()
+            valid, msg = validate_tc(username)
+            if valid:
+                break
+            print(f"  ❌ {msg}")
+        password = getpass.getpass("  Şifre: ").strip()
+        if not password:
+            print("  ❌ Şifre boş olamaz.")
+            return
         save_credentials(username, password)
         print("  ✅ Bilgiler güvenli şekilde kaydedildi.\n")
     elif not password:
-        # Hesap var ama şifre eksik (örn. keyring→Fernet geçişi sonrası)
+        # Hesap var ama şifre eksik
         accounts = get_all_accounts()
         idx = get_active_index()
         label = accounts[idx].get('label', username) if accounts else username
@@ -1301,18 +1915,34 @@ def main():
         add_account(username, password, label)
         print("  ✅ Şifre güvenli şekilde kaydedildi.\n")
     else:
-        # TC'nin ilk 3 ve son 3 hanesini göster
+        accounts = get_all_accounts()
+        idx = get_active_index()
+        label = accounts[idx].get('label') if accounts and idx < len(accounts) else None
         tc_masked = username[:3] + "****" + username[-3:] if len(username) > 6 else username
-        print(f"  👤 Hesap: {tc_masked}")
+        display_name = f"{label} ({tc_masked})" if label and label != username else tc_masked
+        print(f"  👤 Hesap: {display_name}")
+
+    # Aktif hesabın kotası bu ay dolmuş olarak etiketlendiyse, kotası olan hesaba otomatik geç
+    if username and is_account_quota_depleted(username):
+        alt_idx = get_next_account_index(skip_quota_depleted=True)
+        if alt_idx is not None:
+            accounts = get_all_accounts()
+            alt_acc = accounts[alt_idx]
+            alt_label = alt_acc.get('label', alt_acc['tc'][:3] + '****')
+            print(f"  ℹ️  Aktif hesabın kotası bu ay dolmuş. Kotası açık hesaba geçiliyor: {alt_label}")
+            set_active_index(alt_idx)
+            username, password = get_credentials()
     
     # ── 2. Bağlantı döngüsü — NE OLURSA OLSUN BAĞLAN ──────────────
     session = None
     info = None
     attempt = 0
     max_login_attempts = 50  # Çok yüksek — pratik olarak sonsuz
+    attempted_tc = set()     # Şifre veya kota nedeniyle denenen hesaplar
     
     while attempt < max_login_attempts:
         attempt += 1
+        attempted_tc.add(username)
         
         print(f"\n  🔄 Bağlantı denemesi #{attempt}...")
         
@@ -1323,11 +1953,15 @@ def main():
         if on_gsb:
             print(f"  📶 Wi-Fi ağı: {ssid}")
         else:
-            print(f"  📶 Wi-Fi ağı: {ssid or 'Bağlı değil'}")
-            print("  📡 GSB ağına otomatik bağlanmaya çalışılıyor...")
+            if ssid:
+                print(f"  📶 Wi-Fi ağı: {ssid} (GSB değil!)")
+                print(f"  🔀 '{ssid}' ağından ayrılıp GSB Wi-Fi'ye geçiliyor...")
+            else:
+                print(f"  📶 Wi-Fi ağı: Bağlı değil")
+                print("  📡 GSB ağına otomatik bağlanmaya çalışılıyor...")
             if _force_connect_gsb():
-                ssid = _check_ssid()
-                print(f"  ✅ Güncel Wi-Fi ağı: {ssid}")
+                ssid = _check_ssid() or "GSBWIFI"
+                print(f"  ✅ GSB ağına bağlandı: {ssid}")
             else:
                 print("  ❌ GSB ağına bağlanılamadı. Kapsama alanında olduğunuza emin olun.")
         
@@ -1379,29 +2013,78 @@ def main():
         
         if result['status'] == 'connected':
             session = result['session']
+            _current_active_session[0] = session
             info = result['user_info']
             
             # Kullanıcı adını güncelle
             if info and info.get('Kullanıcı'):
-                update_account_label(username, info['Kullanıcı'])
+                updated = update_account_label(username, info['Kullanıcı'])
+                if updated:
+                    print(f"  ✨ Hesap ismi güncellendi: {info['Kullanıcı']}")
             
             print(f"\n  ✅ {result['message']}")
+            
+            # ── Kota kontrolü: Bitmiş mi? ──
+            if info and is_quota_depleted(info):
+                print("\n  ⚠️  Bu hesabın kotası tükenmiş! (Ay sonuna kadar pasif olarak etiketlendi)")
+                mark_account_quota_depleted(username, True)
+                next_idx = get_next_account_index(skip_quota_depleted=True)
+                accounts = get_all_accounts()
+                if next_idx is not None and next_idx < len(accounts) and accounts[next_idx]['tc'] not in attempted_tc:
+                    next_acc = accounts[next_idx]
+                    next_label = next_acc.get('label', next_acc['tc'][:3] + '****')
+                    print(f"  🔄 Sonraki hesaba geçiliyor: {next_label}")
+                    
+                    # Mevcut oturumu kapat
+                    try:
+                        logout(session)
+                    except Exception:
+                        pass
+                    session = None
+                    _current_active_session[0] = None
+                    
+                    # Sonraki hesaba geç
+                    set_active_index(next_idx)
+                    username, password = get_credentials()
+                    if username and password:
+                        attempt = 0  # Sayacı sıfırla
+                        continue
+                else:
+                    print("  📛 Başka aktif kotası olan hesap bulunamadı (Tüm hesapların kotası dolmuş)!")
+                    print("  💡 Kotalar ay başında otomatik olarak yenilenecektir.")
+            else:
+                # Kota tükenmemiş, varsa eski etiketi temizle
+                mark_account_quota_depleted(username, False)
+            
             break
         
         elif result['status'] == 'login_failed':
             print(f"  ❌ {result['message']}")
             
             if result['error_type'] == 'wrong_password':
-                print("  🔑 Şifre hatalı! Bilgileri sıfırlamak için: gsb --reset")
+                print("  🔑 TC veya şifre hatalı!")
+                
+                # Başka hesap var mı ve denenmedi mi?
+                next_idx = get_next_account_index(skip_quota_depleted=True)
+                accounts = get_all_accounts()
+                if next_idx is not None and next_idx < len(accounts) and accounts[next_idx]['tc'] not in attempted_tc:
+                    next_acc = accounts[next_idx]
+                    next_label = next_acc.get('label', next_acc['tc'][:3] + '****')
+                    print(f"  🔄 Sonraki hesaba geçiliyor: {next_label}")
+                    set_active_index(next_idx)
+                    username, password = get_credentials()
+                    if username and password:
+                        attempt = 0
+                        continue
+                
+                # Başka hesap yoksa veya tüm hesaplar denendiyse dur
+                print("  ⛔ Kayıtlı hesaplar ile bağlantı sağlanamadı (şifre hatalı).")
+                print("  💡 Bilgileri düzenlemek için: gsb --reset veya gsb --add-account")
                 return
             
             # max_entry veya diğer hatalar — tekrar dene
             if result['error_type'] == 'max_entry':
-                print("  🔄 Eski oturum kapatılıp tekrar denenecek...")
-                try:
-                    logout()  # Eski oturumu kapat
-                except Exception:
-                    pass
+                print("  📱 Diğer cihazlar sonlandırılıyor, tekrar denenecek...")
                 time.sleep(3)
                 continue
             
@@ -1438,59 +2121,297 @@ def main():
     
     # ── 4. Keepalive veya zamanlı çıkış ────────────────────────────
     if keepalive_mode:
-        print("\n  🔒 Bağlantı izleme aktif. (Ctrl+C ile çıkabilirsiniz)")
-        print("     Bağlantı koparsa otomatik yeniden bağlanacak.\n")
+        _print_keepalive_banner()
         
         fail_count = 0
-        check_interval = 15  # 15 saniyede bir kontrol
+        consecutive_fails = 0  # Ardışık başarısızlık sayısı
+        check_interval = 30  # 30 saniyede bir kontrol (GSB ağında daha kararlı)
         
         while True:
             try:
-                time.sleep(check_interval)
-                
-                if not check_internet():
-                    fail_count += 1
-                    ts = time.strftime('%H:%M:%S')
-                    print(f"  [{ts}] ⚠️  Bağlantı kesildi! Yeniden bağlanılıyor... (#{fail_count})")
-                    
-                    # Önce basit login dene
-                    login_result = login(username, password)
-                    if login_result['success']:
-                        session = login_result['session']
-                        fail_count = 0
-                        print(f"  [{time.strftime('%H:%M:%S')}] ✅ Bağlantı yeniden sağlandı!")
+                import select
+                r, _, _ = select.select([sys.stdin], [], [], check_interval)
+                if r:
+                    choice = sys.stdin.readline().strip()
+                    if choice == '1':
+                        try:
+                            while True:
+                                print("\n  ⚙️  Hesap Ayarları Menüsü")
+                                print("  [1] Kayıtlı Hesapları Listele")
+                                print("  [2] Aktif Hesabı Değiştir")
+                                print("  [3] Yeni Hesap Ekle")
+                                print("  [4] Hesap Sil")
+                                print("  [0] Menüden Çık ve İzlemeye Dön")
+                                
+                                sub = input("\n  Seçiminiz: ").strip()
+                                if sub == '1':
+                                    accounts = get_all_accounts()
+                                    idx = get_active_index()
+                                    print("\n  📋 Kayıtlı Hesaplar:")
+                                    if not accounts:
+                                        print("     Kayıtlı hesap yok.")
+                                    else:
+                                        for i, acc in enumerate(accounts):
+                                            marker = "⭐" if i == idx else "  "
+                                            quota_tag = " [⚠️ Kota Dolu (Ay Sonu Yenilenir)]" if is_account_quota_depleted(acc) else ""
+                                            print(f"     {marker} [{i}] {acc.get('label', acc['tc'])} ({acc['tc'][:3]}********){quota_tag}")
+                                elif sub == '2':
+                                    accounts = get_all_accounts()
+                                    if not accounts:
+                                        print("  ❌ Kayıtlı hesap yok.")
+                                    else:
+                                        print("\n  📋 Kayıtlı Hesaplar:")
+                                        curr_active = get_active_index()
+                                        for i, acc in enumerate(accounts):
+                                            marker = "⭐" if i == curr_active else "  "
+                                            quota_tag = " [⚠️ Kota Dolu (Ay Sonu Yenilenir)]" if is_account_quota_depleted(acc) else ""
+                                            print(f"     {marker} [{i}] {acc.get('label', acc['tc'])} ({acc['tc'][:3]}********){quota_tag}")
+                                        idx_str = input("\n  Geçilecek hesabın Index numarası (İptal için Enter): ").strip()
+                                        if not idx_str:
+                                            continue
+                                        if idx_str.isdigit() and 0 <= int(idx_str) < len(accounts):
+                                            new_idx = int(idx_str)
+                                            if new_idx == curr_active:
+                                                print("  ℹ️ Bu hesap zaten aktif hesap.")
+                                                continue
+                                            set_active_index(new_idx)
+                                            chosen = accounts[new_idx]
+                                            quota_tag = " (⚠️ Kota Dolu)" if is_account_quota_depleted(chosen) else ""
+                                            print(f"  ✅ Aktif hesap seçildi: [{new_idx}] {chosen.get('label', chosen['tc'])}{quota_tag}")
+                                            username, password = get_credentials()
+                                            
+                                            ans = input("  🔄 Şimdi bu hesaba geçiş yapılsın mı? (E/h): ").strip().lower()
+                                            if ans in ('', 'e', 'evet', 'y', 'yes'):
+                                                print("  🔒 Mevcut oturum kapatılıyor...")
+                                                if session:
+                                                    try:
+                                                        logout(session)
+                                                    except Exception:
+                                                        pass
+                                                session = None
+                                                _current_active_session[0] = None
+                                                print(f"  📡 {chosen.get('label', chosen['tc'])} ile giriş yapılıyor...")
+                                                res = connect_and_fetch(username, password)
+                                                if res['status'] == 'connected':
+                                                    session = res['session']
+                                                    info = res['user_info']
+                                                    _current_active_session[0] = session
+                                                    consecutive_fails = 0
+                                                    fail_count = 0
+                                                    print("  ✅ Yeni hesapla başarıyla bağlanıldı!")
+                                                    _print_user_info_table(info)
+                                                    _print_keepalive_banner()
+                                                    break
+                                                else:
+                                                    print(f"  ❌ Yeni hesaba geçilemedi: {res['message']}")
+                                        else:
+                                            print(f"  ❌ Geçersiz index! 0 ile {len(accounts)-1} arasında girin.")
+                                elif sub == '3':
+                                    print("\n  ➕ Yeni Hesap Ekle")
+                                    tc = input("  TC Kimlik No (İptal için Enter): ").strip()
+                                    if not tc:
+                                        continue
+                                    valid, msg = validate_tc(tc)
+                                    if not valid:
+                                        print(f"  ❌ {msg}")
+                                        continue
+                                    pwd = getpass.getpass("  Şifre: ").strip()
+                                    if not pwd:
+                                        print("  ❌ Şifre boş olamaz.")
+                                        continue
+                                    label = input("  Etiket (Örn: Telefonum): ").strip()
+                                    is_new = add_account(tc, pwd, label or tc)
+                                    if is_new:
+                                        print(f"  ✅ Yeni hesap eklendi: {label or tc}")
+                                    else:
+                                        print(f"  ℹ️  Mevcut hesap güncellendi: {label or tc}")
+                                    
+                                    ans = input("  🔄 Şimdi bu yeni hesaba geçiş yapılsın mı? (E/h): ").strip().lower()
+                                    if ans in ('', 'e', 'evet', 'y', 'yes'):
+                                        accounts = get_all_accounts()
+                                        for i, a in enumerate(accounts):
+                                            if a['tc'] == tc:
+                                                set_active_index(i)
+                                                break
+                                        username, password = get_credentials()
+                                        print("  🔒 Mevcut oturum kapatılıyor...")
+                                        if session:
+                                            try:
+                                                logout(session)
+                                            except Exception:
+                                                pass
+                                        session = None
+                                        _current_active_session[0] = None
+                                        print(f"  📡 {label or tc} ile giriş yapılıyor...")
+                                        res = connect_and_fetch(username, password)
+                                        if res['status'] == 'connected':
+                                            session = res['session']
+                                            info = res['user_info']
+                                            _current_active_session[0] = session
+                                            consecutive_fails = 0
+                                            fail_count = 0
+                                            print("  ✅ Yeni hesapla başarıyla bağlanıldı!")
+                                            _print_user_info_table(info)
+                                            _print_keepalive_banner()
+                                            break
+                                        else:
+                                            print(f"  ❌ Giriş yapılamadı: {res['message']}")
+                                elif sub == '4':
+                                    accounts = get_all_accounts()
+                                    if not accounts:
+                                        print("  ❌ Kayıtlı hesap yok.")
+                                    else:
+                                        print("\n  📋 Silinecek Hesabı Seçin:")
+                                        curr_active = get_active_index()
+                                        for i, acc in enumerate(accounts):
+                                            marker = "⭐" if i == curr_active else "  "
+                                            print(f"     {marker} [{i}] {acc.get('label', acc['tc'])} ({acc['tc'][:3]}********)")
+                                        target = input("\n  Index numarası veya TC Kimlik No (İptal için Enter): ").strip()
+                                        if not target:
+                                            continue
+                                        if target.isdigit() and len(target) < 3 and 0 <= int(target) < len(accounts):
+                                            target_tc = accounts[int(target)]['tc']
+                                            target_label = accounts[int(target)].get('label', target_tc)
+                                        else:
+                                            target_tc = target
+                                            target_label = target
+                                            for a in accounts:
+                                                if a['tc'] == target_tc:
+                                                    target_label = a.get('label', target_tc)
+                                                    break
+                                        
+                                        confirm = input(f"  ⚠️  '{target_label}' ({target_tc[:3]}****) hesabını silmek istediğinize emin misiniz? (e/H): ").strip().lower()
+                                        if confirm in ('e', 'evet', 'y', 'yes'):
+                                            is_active_deleted = (target_tc == username)
+                                            if remove_account(target_tc):
+                                                print(f"  ✅ Hesap silindi: {target_label}")
+                                                accounts = get_all_accounts()
+                                                if accounts:
+                                                    username, password = get_credentials()
+                                                    if is_active_deleted:
+                                                        new_active = accounts[get_active_index()]
+                                                        print(f"  🔒 Silinen hesabın ({target_label}) oturumu kapatılıyor...")
+                                                        if session:
+                                                            try:
+                                                                logout(session)
+                                                            except Exception:
+                                                                pass
+                                                        session = None
+                                                        _current_active_session[0] = None
+                                                        
+                                                        print(f"  🔄 '{new_active.get('label', new_active['tc'])}' hesabına otomatik geçiş yapılıyor...")
+                                                        res = connect_and_fetch(username, password)
+                                                        if res['status'] == 'connected':
+                                                            session = res['session']
+                                                            info = res['user_info']
+                                                            _current_active_session[0] = session
+                                                            consecutive_fails = 0
+                                                            fail_count = 0
+                                                            print("  ✅ Yeni hesaba başarıyla geçildi!")
+                                                            _print_user_info_table(info)
+                                                            _print_keepalive_banner()
+                                                            break
+                                                        else:
+                                                            print(f"  ❌ Yeni hesaba otomatik bağlanılamadı: {res['message']}")
+                                                else:
+                                                    print("  🔒 Silinen hesabın oturumu kapatılıyor...")
+                                                    if session:
+                                                        try:
+                                                            logout(session)
+                                                        except Exception:
+                                                            pass
+                                                    session = None
+                                                    _current_active_session[0] = None
+                                                    print("  ⚠️  Kayıtlı hiç hesap kalmadı. Oturum kapatıldı.")
+                                                    break
+                                            else:
+                                                print("  ❌ Hesap bulunamadı.")
+                                elif sub == '0':
+                                    print("\n  ▶️ İzlemeye devam ediliyor...")
+                                    username, password = get_credentials()
+                                    if session:
+                                        try:
+                                            fresh = fetch_user_info(session)
+                                            if fresh:
+                                                info = fresh
+                                        except Exception:
+                                            pass
+                                        _print_user_info_table(info)
+                                    else:
+                                        print("  ℹ️ Aktif oturum yok, bağlantı kontrol edilecek...")
+                                    _print_keepalive_banner()
+                                    break
+                                else:
+                                    print("  ❌ Geçersiz seçim.")
+                        except (KeyboardInterrupt, EOFError):
+                            print("\n  ↩️  Menüden çıkıldı, izlemeye dönülüyor...")
+                            username, password = get_credentials()
+                            _print_keepalive_banner()
                         continue
+                
+                ts = time.strftime('%H:%M:%S')
+                
+                # 1. Önce GSB portal oturumunu kontrol et (en güvenilir yöntem)
+                session_alive = check_gsb_session_alive(session)
+                
+                if session_alive:
+                    # Oturum açık — internet erişimini ayrıca kontrol etmeye gerek yok
+                    if consecutive_fails > 0:
+                        print(f"  [{ts}] ✅ Bağlantı stabil!")
+                    consecutive_fails = 0
+                    fail_count = 0
+                    continue
+                
+                # 2. Portal oturumu kapalı görünüyor — gerçekten mi kontrol et
+                #    (GSB ağı yavaş olabilir, tek başarısızlıkta panik yapma)
+                if consecutive_fails == 0:
+                    consecutive_fails += 1
+                    time.sleep(5)  # 5sn bekle
                     
-                    # Login olmadıysa ağ sorunu var, kurtarma başlat
-                    if fail_count >= 2:
-                        print(f"  [{time.strftime('%H:%M:%S')}] 🔧 Ağ kurtarma başlatılıyor...")
-                        recovery = aggressive_network_recovery(
-                            max_cycles=3, verbose=True
-                        )
-                        if recovery['success']:
-                            login_result = login(username, password)
-                            if login_result['success']:
-                                session = login_result['session']
-                                fail_count = 0
-                                print(f"  [{time.strftime('%H:%M:%S')}] ✅ Kurtarma başarılı, bağlantı sağlandı!")
-                                continue
-                    
-                    if fail_count > 10:
-                        print(f"  [{time.strftime('%H:%M:%S')}] 😔 Çok fazla başarısız deneme, 60sn bekleniyor...")
-                        time.sleep(60)
-                    elif fail_count > 5:
-                        print(f"  [{time.strftime('%H:%M:%S')}] ⏳ 15sn bekleniyor...")
-                        time.sleep(15)
-                else:
-                    if fail_count > 0:
-                        print(f"  [{time.strftime('%H:%M:%S')}] ✅ Bağlantı tekrar sağlandı!")
-                        fail_count = 0
+                    if check_gsb_session_alive(session) or check_internet():
+                        consecutive_fails = 0
+                        continue
+                
+                # 3. Ardışık başarısızlık — gerçekten bağlantı kopmuş
+                consecutive_fails += 1
+                fail_count += 1
+                print(f"  [{ts}] ⚠️  GSB oturumu düştü! Yeniden bağlanılıyor... (#{fail_count})")
+                
+                # Önce basit login dene
+                login_result = login(username, password)
+                if login_result['success']:
+                    session = login_result['session']
+                    _current_active_session[0] = session
+                    consecutive_fails = 0
+                    fail_count = 0
+                    print(f"  [{time.strftime('%H:%M:%S')}] ✅ Bağlantı yeniden sağlandı!")
+                    continue
+                
+                # Login olmadıysa ağ sorunu var, kurtarma başlat
+                if fail_count >= 2:
+                    print(f"  [{time.strftime('%H:%M:%S')}] 🔧 Ağ kurtarma başlatılıyor...")
+                    recovery = aggressive_network_recovery(
+                        max_cycles=3, verbose=True
+                    )
+                    if recovery['success']:
+                        login_result = login(username, password)
+                        if login_result['success']:
+                            session = login_result['session']
+                            _current_active_session[0] = session
+                            consecutive_fails = 0
+                            fail_count = 0
+                            print(f"  [{time.strftime('%H:%M:%S')}] ✅ Kurtarma başarılı, bağlantı sağlandı!")
+                            continue
+                
+                if fail_count > 10:
+                    print(f"  [{time.strftime('%H:%M:%S')}] 😔 Çok fazla başarısız deneme, 60sn bekleniyor...")
+                    time.sleep(60)
+                elif fail_count > 5:
+                    print(f"  [{time.strftime('%H:%M:%S')}] ⏳ 15sn bekleniyor...")
+                    time.sleep(15)
                 
             except KeyboardInterrupt:
-                print("\n")
-                print("  🔒 Oturum kapatılıyor...")
-                logout_result = logout(session)
-                print(f"  {logout_result['message']}")
+                print("\n  🔓 Bağlantı açık bırakılarak çıkılıyor... (Ctrl+C)")
                 print("\n  👋 Güle güle!")
                 break
             except Exception as e:
@@ -1499,7 +2420,7 @@ def main():
     else:
         # --no-keep modunda: 60sn sonra logout
         print(f"\n  ⏳ {AUTO_LOGOUT_SECONDS}sn sonra otomatik çıkış yapılacak...")
-        print(f"     (Ctrl+C ile erken çıkabilirsiniz)")
+        print(f"     (Ctrl+C ile bağlantıyı açık bırakıp çıkabilirsiniz)")
         try:
             for remaining in range(AUTO_LOGOUT_SECONDS, 0, -1):
                 mins, secs = divmod(remaining, 60)
@@ -1507,8 +2428,11 @@ def main():
                 time.sleep(1)
             print()
         except KeyboardInterrupt:
-            print("\n\n  ⚡ Erken çıkış.")
+            print("\n\n  🔓 Bağlantı açık bırakılarak çıkılıyor... (Ctrl+C)")
+            print("\n  👋 Güle güle!")
+            return
 
+        # Süre normal dolduysa çıkış yap
         logout_result = logout(session)
         print(f"\n  🔒 {logout_result['message']}")
         print("\n  👋 Güle güle!")
