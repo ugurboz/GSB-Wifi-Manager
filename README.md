@@ -98,25 +98,25 @@ pip install -e .
 ```
 
 Kurulum tamamlandıktan sonra:
-* `gsb` : Terminal bağlantı ve izleme modunu başlatır.
-* `gsb-gui` : Masaüstü grafik arayüzünü (GUI) açar.
+* `gsb` : Masaüstü grafik arayüzünü (GUI) açar.
+* `gsb-cli` : Terminal bağlantı ve izleme modunu başlatır.
 
 ---
 
 ## ⌨️ CLI Komut Satırı Parametreleri
 
-`gsb` komutunu parametrelerle kullanarak hesapları kolayca yönetebilirsiniz:
+`gsb-cli` komutunu parametrelerle kullanarak hesapları kolayca yönetebilirsiniz:
 
 | Komut | Açıklama |
 | :--- | :--- |
-| `gsb` | Aktif hesapla otomatik bağlanır ve canlı izleme modunu başlatır. |
-| `gsb --list-accounts` | Kayıtlı tüm profilleri, aktif hesabı ve kota durumlarını listeler. |
-| `gsb --switch-account [idx]` | Belirtilen indeks numaralı hesaba geçiş yapar (Parametresiz girilirse seçim listesi sunar). |
-| `gsb --add-account` | Terminalden yeni bir TC ve şifre ekler veya mevcut hesabı günceller. |
-| `gsb --remove-account [tc/idx]` | Belirtilen hesabı siler (TC veya indeks numarası girilebilir). |
-| `gsb --logout` | Açık olan GSB portal oturumunu kapatır ve internet bağlantısını keser. |
-| `gsb --reset` | Cihazda kayıtlı tüm hesap bilgilerini sıfırlar. |
-| `gsb --no-keep` | Giriş yaptıktan sonra arka planda izleme yapmaz, 60 saniye sonra oturumu kapatır. |
+| `gsb-cli` | Aktif hesapla otomatik bağlanır ve canlı izleme modunu başlatır. |
+| `gsb-cli --list-accounts` | Kayıtlı tüm profilleri, aktif hesabı ve kota durumlarını listeler. |
+| `gsb-cli --switch-account [idx]` | Belirtilen indeks numaralı hesaba geçiş yapar (Parametresiz girilirse seçim listesi sunar). |
+| `gsb-cli --add-account` | Terminalden yeni bir TC ve şifre ekler veya mevcut hesabı günceller. |
+| `gsb-cli --remove-account [tc/idx]` | Belirtilen hesabı siler (TC veya indeks numarası girilebilir). |
+| `gsb-cli --logout` | Açık olan GSB portal oturumunu kapatır ve internet bağlantısını keser. |
+| `gsb-cli --reset` | Cihazda kayıtlı tüm hesap bilgilerini sıfırlar. |
+| `gsb-cli --no-keep` | Giriş yaptıktan sonra arka planda izleme yapmaz, 60 saniye sonra oturumu kapatır. |
 
 ---
 
